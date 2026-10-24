@@ -898,7 +898,7 @@ fn impl_enum(
                 #parse_body
             }
 
-            #[inline]
+            #[inline(always)]
             fn scan_at(input: &str, pos: usize, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<usize> {
                 #scan_body
             }
