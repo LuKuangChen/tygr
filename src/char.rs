@@ -149,6 +149,55 @@ impl<M: CharClass> Grammar for CharOf<M> {
     }
 }
 
+/// Decode the char starting at byte `pos` of `input`, which must be a char
+/// boundary. Reads the bytes directly: no re-slicing, no boundary re-check.
+#[inline(always)]
+fn decode_at(input: &str, pos: usize) -> Option<(char, usize)> {
+    let b = input.as_bytes();
+    let x = *b.get(pos)? as u32;
+    if x < 0x80 {
+        return Some((x as u8 as char, 1));
+    }
+    // `input` is valid UTF-8 and `pos` is a boundary, so the continuation bytes exist.
+    let (cp, len) = if x < 0xE0 {
+        (((x & 0x1F) << 6) | (b[pos + 1] as u32 & 0x3F), 2)
+    } else if x < 0xF0 {
+        (
+            ((x & 0x0F) << 12) | ((b[pos + 1] as u32 & 0x3F) << 6) | (b[pos + 2] as u32 & 0x3F),
+            3,
+        )
+    } else {
+        (
+            ((x & 0x07) << 18)
+                | ((b[pos + 1] as u32 & 0x3F) << 12)
+                | ((b[pos + 2] as u32 & 0x3F) << 6)
+                | (b[pos + 3] as u32 & 0x3F),
+            4,
+        )
+    };
+    char::from_u32(cp).map(|c| (c, len))
+}
+
+/// Length of the longest run of chars in class `C` starting at `pos`.
+#[inline(always)]
+fn scan_run<C: CharClass>(input: &str, mut pos: usize) -> usize {
+    let b = input.as_bytes();
+    while let Some(&x) = b.get(pos) {
+        if x < 0x80 {
+            if !C::matches(x as char) {
+                break;
+            }
+            pos += 1;
+        } else {
+            match decode_at(input, pos) {
+                Some((c, len)) if C::matches(c) => pos += len,
+                _ => break,
+            }
+        }
+    }
+    pos
+}
+
 /// Matches *zero or more* characters satisfying a character class, collected into a `String`.
 ///
 /// ```
@@ -166,8 +215,16 @@ impl<C: CharClass> Grammar for StringOf<C> {
         Some((StringOf(inner), pos))
     }
 
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
-        Raw::<Vec<CharOf<C>>>::scan_at(input, pos, state)
+    #[inline(always)]
+    fn scan_at(
+        input: &str,
+        pos: usize,
+        #[allow(unused_variables, unused_mut)] mut state: State,
+    ) -> Option<usize> {
+        let end = scan_run::<C>(input, pos);
+        #[cfg(feature = "trace_pos")]
+        CharOf::<C>::fail_at(end, state);
+        Some(end)
     }
 
     fn print_to(&self, buf: &mut String) {
@@ -201,8 +258,20 @@ impl<C: CharClass> Grammar for StringOf1<C> {
         Some((StringOf1(inner), pos))
     }
 
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
-        Raw::<(CharOf<C>, Vec<CharOf<C>>)>::scan_at(input, pos, state)
+    #[inline(always)]
+    fn scan_at(
+        input: &str,
+        pos: usize,
+        #[allow(unused_variables, unused_mut)] mut state: State,
+    ) -> Option<usize> {
+        let end = scan_run::<C>(input, pos);
+        if end == pos {
+            CharOf::<C>::fail_at(pos, state);
+            return None;
+        }
+        #[cfg(feature = "trace_pos")]
+        CharOf::<C>::fail_at(end, state);
+        Some(end)
     }
 
     fn print_to(&self, buf: &mut String) {

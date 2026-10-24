@@ -52,11 +52,11 @@ struct Elements(VecSep<Suffix<Element, Ws>, Suffix<StringEq!(","), Ws>>);
 struct String(Wrap<StringEq!("\""), Range<PhantomData<Characters>>, StringEq!("\"")>);
 
 #[derive(Grammar, Debug)]
-struct Characters(Vec<Character>);
+struct Characters(Vec<Chunk>);
 
 #[derive(Grammar, Debug)]
-enum Character {
-    Normal(CharOf<NormalCharacter>),
+enum Chunk {
+    Run(StringOf1<NormalCharacter>),
     Escape(Prefix<StringEq!("\\"), Escape>),
 }
 
@@ -152,8 +152,8 @@ fn main() -> ExitCode {
                 "{}",
                 bnf_rules![
                     Json, Element, Object, Members, Member, Array, Elements, String, Characters,
-                    Character, Escape, Hex, Number, Nat, Digits, Digit, OneNine, Fraction,
-                    Exponent, Sign, Ws,
+                    Chunk, Escape, Hex, Number, Nat, Digits, Digit, OneNine, Fraction, Exponent,
+                    Sign, Ws,
                 ]
             );
             ExitCode::SUCCESS

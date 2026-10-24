@@ -47,11 +47,11 @@ struct Elements(VecSep<Suffix<Element, Ws>, Suffix<StringEq!(","), Ws>>);
 struct String(Wrap<StringEq!("\""), Characters, StringEq!("\"")>);
 
 #[derive(Grammar)]
-struct Characters(Vec<Character>);
+struct Characters(Vec<Chunk>);
 
 #[derive(Grammar)]
-enum Character {
-    Normal(CharOf<NormalCharacter>),
+enum Chunk {
+    Run(StringOf1<NormalCharacter>),
     Escape(Prefix<StringEq!("\\"), Escape>),
 }
 
