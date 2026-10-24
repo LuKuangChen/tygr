@@ -10,7 +10,6 @@
 use std::marker::PhantomData;
 use std::process::ExitCode;
 
-use either::Either;
 use tygr::*;
 
 #[path = "common/mod.rs"]
@@ -103,38 +102,31 @@ struct Number {
 
 #[derive(Grammar, Debug)]
 enum Nat {
-    Zero(StringEq!("0")),
     Pos(OneNine, Option<Digits>),
+    Zero(StringEq!("0")),
 }
 
 #[derive(Grammar, Debug)]
 struct Digits(Vec<Digit>);
 
 #[derive(Grammar, Debug)]
-enum Digit {
-    Zero(StringEq!("0")),
-    OneNine(OneNine),
-}
+struct Digit(CharOf<DigitClass>);
+
+char_class!(DigitClass, "0-9", |c| c.is_ascii_digit());
 
 #[derive(Grammar, Debug)]
-enum OneNine {
-    D1(StringEq!("1")),
-    D2(StringEq!("2")),
-    D3(StringEq!("3")),
-    D4(StringEq!("4")),
-    D5(StringEq!("5")),
-    D6(StringEq!("6")),
-    D7(StringEq!("7")),
-    D8(StringEq!("8")),
-    D9(StringEq!("9")),
-}
+struct OneNine(CharOf<OneNineClass>);
+
+char_class!(OneNineClass, "1-9", |c| ('1'..='9').contains(&c));
+
+char_class!(EClass, "e or E", |c| c == 'e' || c == 'E');
 
 #[derive(Grammar, Debug)]
 struct Fraction(Prefix<StringEq!("."), Digits>);
 
 #[derive(Grammar, Debug)]
 struct Exponent {
-    e: Either<StringEq!("E"), StringEq!("e")>,
+    e: CharOf<EClass>,
     sign: Option<Sign>,
     digits: Digits,
 }
@@ -146,16 +138,12 @@ enum Sign {
 }
 
 #[derive(Grammar, Debug)]
-struct Ws(PhantomData<Vec<W>>);
+struct Ws(PhantomData<StringOf<WsClass>>);
 
-#[derive(Grammar, Debug)]
-#[grammar(inline)]
-enum W {
-    C0020(StringEq!("\u{0020}")),
-    C000A(StringEq!("\u{000A}")),
-    C000D(StringEq!("\u{000D}")),
-    C0009(StringEq!("\u{0009}")),
-}
+char_class!(WsClass, "JSON whitespace", |c| matches!(
+    c,
+    ' ' | '\n' | '\r' | '\t'
+));
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
