@@ -370,8 +370,7 @@ pub struct VecSepSource<T, S> {
 }
 
 /// One or more items, with a separator between each pair.
-#[derive(Debug, Clone, PartialEq, Eq, GrammarFromOther)]
-#[grammar(inline)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VecSep<T, S> {
     /// The `T` items, in order.
     pub items: Vec<T>,
@@ -404,6 +403,75 @@ impl<T: Grammar, S: Grammar> GrammarFrom for VecSep<T, S> {
             sep.print_to(buf);
             item.print_to(buf);
         }
+    }
+}
+
+// Written by hand rather than `#[derive(GrammarFromOther)]` only so that
+// `parse_at` can push straight into `items`/`seps`: going through
+// `VecSepSource` would box the head, build `rest`, then copy everything into
+// two fresh vectors. Everything else delegates to `VecSepSource`, exactly as
+// the derive (with `#[grammar(inline)]`) would.
+impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
+    type First = <VecSepSource<T, S> as Grammar>::First;
+
+    #[inline]
+    fn parse_at(input: &str, pos: usize, mut state: State) -> Option<(Self, usize)> {
+        let (head, mut pos) = T::parse_at(input, pos, state.reborrow())?;
+        // Not `vec![head]`: that allocates room for exactly one item, so a
+        // second item always reallocates. Let `Vec`'s growth policy size it.
+        let mut items = Vec::new();
+        items.push(head);
+        let mut seps = Vec::new();
+        // Same as `Vec<SepItem<S, T>>`: stop at the first `S T` that fails
+        // or matches empty.
+        loop {
+            let Some((sep, after_sep)) = S::parse_at(input, pos, state.reborrow()) else {
+                break;
+            };
+            let Some((item, after_item)) = T::parse_at(input, after_sep, state.reborrow()) else {
+                break;
+            };
+            if after_item == pos {
+                break;
+            }
+            seps.push(sep);
+            items.push(item);
+            pos = after_item;
+        }
+        Some((VecSep { items, seps }, pos))
+    }
+
+    #[inline(always)]
+    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
+        <VecSepSource<T, S> as Grammar>::scan_at(input, pos, state)
+    }
+
+    fn print_to(&self, buf: &mut String) {
+        <Self as GrammarFrom>::print_to(self, buf);
+    }
+
+    fn to_bnf() -> bnf::Expr {
+        <VecSepSource<T, S> as Grammar>::to_bnf()
+    }
+
+    fn fail_at(pos: usize, state: State) -> bool {
+        <VecSepSource<T, S> as Grammar>::fail_at(pos, state)
+    }
+}
+
+impl<T: Grammar, S: Grammar> GrammarRule for VecSep<T, S> {
+    // Matches what the derive's default naming would give.
+    #[cfg(not(any(feature = "lower_bnf_name", feature = "upper_bnf_name")))]
+    const NAME: &'static str = "VecSep";
+    #[cfg(all(feature = "lower_bnf_name", not(feature = "upper_bnf_name")))]
+    const NAME: &'static str = "vecsep";
+    #[cfg(all(feature = "upper_bnf_name", not(feature = "lower_bnf_name")))]
+    const NAME: &'static str = "VECSEP";
+    #[cfg(all(feature = "lower_bnf_name", feature = "upper_bnf_name"))]
+    const NAME: &'static str = "VecSep";
+
+    fn to_bnf_def() -> bnf::Expr {
+        <VecSepSource<T, S> as Grammar>::to_bnf()
     }
 }
 

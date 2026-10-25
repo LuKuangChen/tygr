@@ -254,9 +254,10 @@ pub struct StringOf<C: CharClass>(Raw<Vec<CharOf<C>>>);
 impl<C: CharClass> Grammar for StringOf<C> {
     type First = <Raw<Vec<CharOf<C>>> as Grammar>::First;
 
+    #[inline]
     fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
-        let (inner, pos) = Raw::parse_at(input, pos, state)?;
-        Some((StringOf(inner), pos))
+        let end = Self::scan_at(input, pos, state)?;
+        Some((StringOf(Raw::new(&input[pos..end])), end))
     }
 
     #[inline(always)]
@@ -297,9 +298,10 @@ pub struct StringOf1<C: CharClass>(Raw<(CharOf<C>, Vec<CharOf<C>>)>);
 impl<C: CharClass> Grammar for StringOf1<C> {
     type First = <Raw<(CharOf<C>, Vec<CharOf<C>>)> as Grammar>::First;
 
+    #[inline]
     fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
-        let (inner, pos) = Raw::parse_at(input, pos, state)?;
-        Some((StringOf1(inner), pos))
+        let end = Self::scan_at(input, pos, state)?;
+        Some((StringOf1(Raw::new(&input[pos..end])), end))
     }
 
     #[inline(always)]
