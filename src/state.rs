@@ -1,4 +1,4 @@
-#[cfg(feature = "trace_one_node")]
+#[cfg(feature = "trace_expect")]
 use core::str;
 #[cfg(feature = "trace_pos")]
 use std::cmp::Ordering;
@@ -61,13 +61,13 @@ impl<'a> State<'a> {
     pub fn expect(
         &mut self,
         other_pos: usize,
-        #[cfg(feature = "trace_one_node")] expectation: Expectation,
+        #[cfg(feature = "trace_expect")] expectation: Expectation,
     ) {
         self.history.expect(
             #[cfg(feature = "trace_one_node")]
             self.context,
             other_pos,
-            #[cfg(feature = "trace_one_node")]
+            #[cfg(feature = "trace_expect")]
             expectation,
         );
     }
@@ -89,7 +89,7 @@ impl<'a> State<'a> {
 #[cfg(feature = "trace_pos")]
 #[derive(std::fmt::Debug, Default)]
 pub(crate) struct History {
-    #[cfg(feature = "trace_one_node")]
+    #[cfg(feature = "trace_expect")]
     traces: Vec<Trace>,
     #[cfg(feature = "trace_pos")]
     pos: usize,
@@ -102,7 +102,7 @@ impl History {
     }
 
     pub(crate) fn into_error(self) -> Error {
-        #[cfg(feature = "trace_one_node")]
+        #[cfg(feature = "trace_expect")]
         let traces = {
             let mut traces = self.traces;
             for trace in &mut traces {
@@ -111,7 +111,7 @@ impl History {
             traces
         };
         Error {
-            #[cfg(feature = "trace_one_node")]
+            #[cfg(feature = "trace_expect")]
             traces,
             #[cfg(feature = "trace_pos")]
             pos: self.pos,
@@ -150,7 +150,7 @@ pub enum Expectation {
     },
 }
 
-#[cfg(feature = "trace_one_node")]
+#[cfg(feature = "trace_expect")]
 fn escape_string(s: &str) -> String {
     s.chars()
         .map(|char| match char {
@@ -163,7 +163,7 @@ fn escape_string(s: &str) -> String {
         .collect()
 }
 
-#[cfg(feature = "trace_one_node")]
+#[cfg(feature = "trace_expect")]
 impl Display for Expectation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -226,23 +226,28 @@ impl History {
         &mut self,
         #[cfg(feature = "trace_one_node")] context: Context<'_>,
         other_pos: usize,
-        #[cfg(feature = "trace_one_node")] expectation: Expectation,
+        #[cfg(feature = "trace_expect")] expectation: Expectation,
     ) {
-        #[cfg(feature = "trace_one_node")]
+        #[cfg(feature = "trace_expect")]
         let trace = || Trace {
+            // Without `trace_one_node` no rule context is kept; an empty
+            // `Vec` does not allocate.
+            #[cfg(feature = "trace_one_node")]
             context: context.to_vec(),
+            #[cfg(not(feature = "trace_one_node"))]
+            context: Vec::new(),
             expectation,
         };
         match self.pos.cmp(&other_pos) {
             Ordering::Equal => {
-                #[cfg(feature = "trace_one_node")]
+                #[cfg(feature = "trace_expect")]
                 {
                     self.traces.push(trace())
                 }
             }
             Ordering::Less => {
                 self.pos = other_pos;
-                #[cfg(feature = "trace_one_node")]
+                #[cfg(feature = "trace_expect")]
                 {
                     self.traces = vec![trace()];
                 }
@@ -324,7 +329,7 @@ pub struct Frame {
 /// those degrade gracefully across feature configurations.
 #[derive(PartialEq, Eq)]
 pub struct Error {
-    #[cfg(feature = "trace_one_node")]
+    #[cfg(feature = "trace_expect")]
     #[doc(hidden)]
     pub traces: Vec<Trace>,
     #[cfg(feature = "trace_pos")]
@@ -346,13 +351,13 @@ pub(crate) fn make_error(#[cfg(feature = "trace_pos")] history: History) -> Erro
 
 impl Error {
     /// The candidate expectations recorded at the deepest position reached.
-    /// Empty unless `trace_one_node` is enabled.
+    /// Empty unless `trace_expect` (or `trace_one_node`) is enabled.
     pub fn traces(&self) -> &[Trace] {
-        #[cfg(feature = "trace_one_node")]
+        #[cfg(feature = "trace_expect")]
         {
             &self.traces
         }
-        #[cfg(not(feature = "trace_one_node"))]
+        #[cfg(not(feature = "trace_expect"))]
         {
             &[]
         }
@@ -378,7 +383,7 @@ impl Display for Error {
         write!(f, "parse error")?;
         #[cfg(feature = "trace_pos")]
         write!(f, " at byte {}", self.pos)?;
-        #[cfg(feature = "trace_one_node")]
+        #[cfg(feature = "trace_expect")]
         {
             let mut lines: Vec<String> = self
                 .traces
@@ -414,7 +419,7 @@ impl Display for Error {
 impl std::fmt::Debug for Error {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        #[cfg(feature = "trace_one_node")]
+        #[cfg(feature = "trace_expect")]
         {
             writeln!(f, ":{}", self.pos)?;
             writeln!(f, "Looking for")?;

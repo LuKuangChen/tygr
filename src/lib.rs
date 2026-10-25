@@ -53,6 +53,7 @@
 //! | `default` | Enables `trace_one_node`. |
 //! | `trace` | Enables all tracing features. |
 //! | `trace_pos` | Traces parser positions. |
+//! | `trace_expect` | Traces what was expected at the farthest position, without grammar nodes. |
 //! | `trace_one_node` | Traces only the nearest grammar node for each attempt. |
 //! | `trace_all_nodes` | Traces the complete grammar node chain for each attempt. |
 //! | `lower_bnf_name` | Converts generated BNF names to lowercase. |
