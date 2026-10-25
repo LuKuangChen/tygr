@@ -239,6 +239,100 @@ macro_rules! char_class {
     };
 }
 
+/// Like [`char_class!`], but the class's ASCII answers are known at compile
+/// time: the predicate must be usable in a `const fn` (comparisons,
+/// `matches!`, `is_ascii_*`, ...), which the compiler enforces. In return the
+/// class gets an exact FIRST set on ASCII, and runs in
+/// [`StringOf`]/[`StringOf1`] answer ASCII chars from a table. Non-ASCII chars
+/// are still decoded and passed to the predicate.
+///
+/// A class can also be a union of other compile-time classes. Including
+/// [`AnyNonAscii`] makes the union accept non-ASCII text without decoding it:
+///
+/// ```
+/// # use tygr::*;
+/// const_char_class!(AsciiLetter, "ASCII letter", |ch| ch.is_ascii_alphabetic());
+/// const_char_class!(Word, "letter", AsciiLetter | AnyNonAscii);
+///
+/// assert_eq!(StringOf::<Word>::scan_prefix("abc日本語 rest"), Ok("abc日本語".len()));
+/// ```
+#[macro_export]
+macro_rules! const_char_class {
+    ($vis:vis $name:ident, $label:expr, |$ch:ident| $pred:expr) => {
+        $vis struct $name;
+        impl $name {
+            #[allow(dead_code)]
+            const fn matches_const($ch: char) -> bool { $pred }
+            const ASCII_TABLE: [bool; 128] = {
+                let mut t = [false; 128];
+                let mut i = 0;
+                while i < 128 {
+                    t[i] = Self::matches_const(i as u8 as char);
+                    i += 1;
+                }
+                t
+            };
+        }
+        impl $crate::CharClass for $name {
+            #[inline]
+            fn matches($ch: char) -> bool { Self::matches_const($ch) }
+            fn name() -> &'static str { $label }
+            const ASCII: Option<&'static [bool; 128]> = Some(&Self::ASCII_TABLE);
+        }
+    };
+    ($vis:vis $name:ident, $label:expr, $first:ty $(| $rest:ty)+) => {
+        $vis struct $name;
+        impl $name {
+            const ASCII_TABLE: [bool; 128] = {
+                const fn part(t: Option<&'static [bool; 128]>) -> &'static [bool; 128] {
+                    match t {
+                        Some(t) => t,
+                        None => panic!("const_char_class! unions need compile-time classes"),
+                    }
+                }
+                let parts = [part(<$first as $crate::CharClass>::ASCII) $(, part(<$rest as $crate::CharClass>::ASCII))+];
+                let mut t = [false; 128];
+                let mut i = 0;
+                while i < 128 {
+                    let mut k = 0;
+                    while k < parts.len() {
+                        t[i] = t[i] || parts[k][i];
+                        k += 1;
+                    }
+                    i += 1;
+                }
+                t
+            };
+            // Some(true) if any part accepts all non-ASCII, Some(false) if
+            // every part rejects all of it, otherwise decided per char.
+            const NON_ASCII_ANSWER: Option<bool> = {
+                let parts = [<$first as $crate::CharClass>::NON_ASCII $(, <$rest as $crate::CharClass>::NON_ASCII)+];
+                let mut any_true = false;
+                let mut all_false = true;
+                let mut k = 0;
+                while k < parts.len() {
+                    match parts[k] {
+                        Some(true) => any_true = true,
+                        Some(false) => {}
+                        None => all_false = false,
+                    }
+                    k += 1;
+                }
+                if any_true { Some(true) } else if all_false { Some(false) } else { None }
+            };
+        }
+        impl $crate::CharClass for $name {
+            #[inline]
+            fn matches(ch: char) -> bool {
+                <$first as $crate::CharClass>::matches(ch) $(|| <$rest as $crate::CharClass>::matches(ch))+
+            }
+            fn name() -> &'static str { $label }
+            const ASCII: Option<&'static [bool; 128]> = Some(&Self::ASCII_TABLE);
+            const NON_ASCII: Option<bool> = Self::NON_ASCII_ANSWER;
+        }
+    };
+}
+
 /// Post-parse validation for `#[grammar(validated)]` types.
 ///
 /// Return `false` to reject the parsed value — the parse backtracks as if

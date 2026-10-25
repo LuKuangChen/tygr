@@ -60,9 +60,14 @@ enum Chunk {
     Escape(Prefix<StringEq!("\\"), Escape>),
 }
 
-char_class!(NormalCharacter, "0x20-0x10FFFF except for \" and \\", |c| {
-    (0x20..=0x10FFFF).contains(&(c as u32)) && (c != '"') && c != '\\'
+const_char_class!(AsciiNormal, "0x20-0x7F except for \" and \\", |c| {
+    matches!(c, ' '..='\u{7F}') && c != '"' && c != '\\'
 });
+const_char_class!(
+    NormalCharacter,
+    "0x20-0x10FFFF except for \" and \\",
+    AsciiNormal | AnyNonAscii
+);
 
 #[derive(Grammar, Debug)]
 enum Escape {
@@ -89,8 +94,8 @@ enum Hex {
     LAToF(CharOf<LAToF>),
 }
 
-char_class!(UAToF, "A-F", |c| ('A'..='F').contains(&c));
-char_class!(LAToF, "a-f", |c| ('a'..='f').contains(&c));
+const_char_class!(UAToF, "A-F", |c| matches!(c, 'A'..='F'));
+const_char_class!(LAToF, "a-f", |c| matches!(c, 'a'..='f'));
 
 #[derive(Grammar, Debug)]
 struct Number {
@@ -112,14 +117,14 @@ struct Digits(Vec<Digit>);
 #[derive(Grammar, Debug)]
 struct Digit(CharOf<DigitClass>);
 
-char_class!(DigitClass, "0-9", |c| c.is_ascii_digit());
+const_char_class!(DigitClass, "0-9", |c| c.is_ascii_digit());
 
 #[derive(Grammar, Debug)]
 struct OneNine(CharOf<OneNineClass>);
 
-char_class!(OneNineClass, "1-9", |c| ('1'..='9').contains(&c));
+const_char_class!(OneNineClass, "1-9", |c| matches!(c, '1'..='9'));
 
-char_class!(EClass, "e or E", |c| c == 'e' || c == 'E');
+const_char_class!(EClass, "e or E", |c| c == 'e' || c == 'E');
 
 #[derive(Grammar, Debug)]
 struct Fraction(Prefix<StringEq!("."), Digits>);
@@ -140,7 +145,7 @@ enum Sign {
 #[derive(Grammar, Debug)]
 struct Ws(PhantomData<StringOf<WsClass>>);
 
-char_class!(WsClass, "JSON whitespace", |c| matches!(
+const_char_class!(WsClass, "JSON whitespace", |c| matches!(
     c,
     ' ' | '\n' | '\r' | '\t'
 ));

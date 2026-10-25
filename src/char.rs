@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 #[cfg(feature = "trace_one_node")]
 use crate::Expectation;
 use crate::bnf::Expr;
-use crate::first::{AnyChar, CharFirst, CharFirstCI, EmptyFirst, First};
+use crate::first::{CharFirst, CharFirstCI, ClassFirst, EmptyFirst, First};
 use crate::grammar::Grammar;
 use crate::state::State;
 use crate::{IntoInner, Raw};
@@ -47,6 +47,46 @@ pub trait CharClass: 'static {
 
     /// Human-readable label (used in error messages and BNF).
     fn name() -> &'static str;
+
+    /// The class's answer for every ASCII char, when it is known at compile
+    /// time (see [`const_char_class!`](crate::const_char_class)). `None` (the default)
+    /// means ASCII chars are decided by calling `matches`.
+    const ASCII: Option<&'static [bool; 128]> = None;
+
+    /// The class's answer for non-ASCII chars, when it is the same for all of
+    /// them: `Some(true)` accepts every non-ASCII char (see [`AnyNonAscii`]),
+    /// `Some(false)` rejects every one. `None` (the default) means each
+    /// non-ASCII char is decoded and passed to `matches`.
+    const NON_ASCII: Option<bool> = None;
+
+    /// `matches` for an ASCII byte, from the compile-time table when there is one.
+    #[inline(always)]
+    fn matches_ascii(x: u8) -> bool {
+        match Self::ASCII {
+            Some(t) => t[(x & 0x7F) as usize],
+            None => Self::matches(x as char),
+        }
+    }
+}
+
+/// The class of every non-ASCII char. Union it with an ASCII class
+/// (`const_char_class!(Name, "label", Ascii | AnyNonAscii)`) so the union accepts
+/// non-ASCII text without decoding it.
+pub struct AnyNonAscii;
+
+impl CharClass for AnyNonAscii {
+    #[inline]
+    fn matches(ch: char) -> bool {
+        !ch.is_ascii()
+    }
+
+    fn name() -> &'static str {
+        "any non-ASCII char"
+    }
+
+    const ASCII: Option<&'static [bool; 128]> = Some(&[false; 128]);
+
+    const NON_ASCII: Option<bool> = Some(true);
 }
 
 /// Matches exactly one character satisfying a character class.
@@ -85,7 +125,7 @@ impl<M: CharClass> CharOf<M> {
 }
 
 impl<M: CharClass> Grammar for CharOf<M> {
-    type First = AnyChar;
+    type First = ClassFirst<M>;
 
     #[inline]
     fn parse_at(
@@ -149,51 +189,55 @@ impl<M: CharClass> Grammar for CharOf<M> {
     }
 }
 
-/// Decode the char starting at byte `pos` of `input`, which must be a char
-/// boundary. Reads the bytes directly: no re-slicing, no boundary re-check.
-#[inline(always)]
-fn decode_at(input: &str, pos: usize) -> Option<(char, usize)> {
-    let b = input.as_bytes();
-    let x = *b.get(pos)? as u32;
-    if x < 0x80 {
-        return Some((x as u8 as char, 1));
-    }
-    // `input` is valid UTF-8 and `pos` is a boundary, so the continuation bytes exist.
-    let (cp, len) = if x < 0xE0 {
-        (((x & 0x1F) << 6) | (b[pos + 1] as u32 & 0x3F), 2)
-    } else if x < 0xF0 {
-        (
-            ((x & 0x0F) << 12) | ((b[pos + 1] as u32 & 0x3F) << 6) | (b[pos + 2] as u32 & 0x3F),
-            3,
-        )
-    } else {
-        (
-            ((x & 0x07) << 18)
-                | ((b[pos + 1] as u32 & 0x3F) << 12)
-                | ((b[pos + 2] as u32 & 0x3F) << 6)
-                | (b[pos + 3] as u32 & 0x3F),
-            4,
-        )
-    };
-    char::from_u32(cp).map(|c| (c, len))
-}
-
 /// Length of the longest run of chars in class `C` starting at `pos`.
 #[inline(always)]
 fn scan_run<C: CharClass>(input: &str, mut pos: usize) -> usize {
     let b = input.as_bytes();
-    while let Some(&x) = b.get(pos) {
-        if x < 0x80 {
-            if !C::matches(x as char) {
-                break;
-            }
-            pos += 1;
-        } else {
-            match decode_at(input, pos) {
-                Some((c, len)) if C::matches(c) => pos += len,
-                _ => break,
+    // Per-byte answers, derived at compile time: ASCII bytes from `ASCII`
+    // (or `matches` when the class has no table), and bytes >= 0x80 accepted
+    // only when every non-ASCII char is (`NON_ASCII == Some(true)`).
+    let accepts: &[bool; 256] = &const {
+        let mut t = [false; 256];
+        if let Some(ascii) = C::ASCII {
+            let mut i = 0;
+            while i < 128 {
+                t[i] = ascii[i];
+                i += 1;
             }
         }
+        if let Some(true) = C::NON_ASCII {
+            let mut i = 128;
+            while i < 256 {
+                t[i] = true;
+                i += 1;
+            }
+        }
+        t
+    };
+    while let Some(&x) = b.get(pos) {
+        // Optimistic: the byte is in the class.
+        let hit = match C::ASCII {
+            Some(_) => accepts[x as usize],
+            None => x < 0x80 && C::matches(x as char),
+        };
+        if hit {
+            pos += 1;
+            continue;
+        }
+        // ASCII not in the class: the run ends.
+        if x < 0x80 {
+            break;
+        }
+        // A non-ASCII char the table didn't accept: decode and ask, unless
+        // the class rejects every non-ASCII char.
+        if C::NON_ASCII == Some(false) {
+            break;
+        }
+        let c = input[pos..].chars().next().unwrap();
+        if !C::matches(c) {
+            break;
+        }
+        pos += c.len_utf8();
     }
     pos
 }
