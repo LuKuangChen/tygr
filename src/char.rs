@@ -426,7 +426,11 @@ impl<const CH: char, T: Token> Token for CharThen<CH, T> {
         pos: usize,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Result<usize, (usize, fn() -> String)> {
-        if input[pos..].starts_with(CH) {
+        // Compare bytes directly: slicing `input[pos..]` would add a
+        // char-boundary check on every literal probe.
+        let mut buf = [0u8; 4];
+        let lit = CH.encode_utf8(&mut buf).as_bytes();
+        if input.as_bytes()[pos..].starts_with(lit) {
             T::scan_at(input, pos + CH.len_utf8(), state)
         } else {
             Err((pos, Self::expectation))
