@@ -10,11 +10,11 @@ use std::char;
 use std::fmt;
 use std::marker::PhantomData;
 
-#[cfg(feature = "trace_expect")]
-use crate::Expectation;
 use crate::bnf::Expr;
 use crate::first::{CharFirst, CharFirstCI, ClassFirst, EmptyFirst, First};
 use crate::grammar::Grammar;
+#[cfg(feature = "trace_expect")]
+use crate::state::PendingExpectation;
 use crate::state::State;
 use crate::{IntoInner, Raw};
 
@@ -156,7 +156,7 @@ impl<M: CharClass> Grammar for CharOf<M> {
             state.expect(
                 pos,
                 #[cfg(feature = "trace_expect")]
-                Expectation::CharClass(M::name()),
+                PendingExpectation::CharClass(M::name()),
             );
             None
         }
@@ -183,7 +183,7 @@ impl<M: CharClass> Grammar for CharOf<M> {
         state.expect(
             pos,
             #[cfg(feature = "trace_expect")]
-            Expectation::CharClass(M::name()),
+            PendingExpectation::CharClass(M::name()),
         );
         true
     }
@@ -493,7 +493,7 @@ impl<T: Token> Grammar for StringEq<T> {
                 state.expect(
                     fail_pos,
                     #[cfg(feature = "trace_expect")]
-                    Expectation::StringEq(expectation(), T::expectation()),
+                    PendingExpectation::StringEq(expectation, T::expectation),
                 );
                 None
             }
@@ -516,7 +516,7 @@ impl<T: Token> Grammar for StringEq<T> {
         state.expect(
             pos,
             #[cfg(feature = "trace_expect")]
-            Expectation::StringEq(T::expectation(), T::expectation()),
+            PendingExpectation::StringEq(T::expectation, T::expectation),
         );
         true
     }
@@ -577,7 +577,7 @@ impl<T: Token> Grammar for StringEqCI<T> {
                 state.expect(
                     fail_pos,
                     #[cfg(feature = "trace_expect")]
-                    Expectation::StringEqCI(expectation(), T::expectation()),
+                    PendingExpectation::StringEqCI(expectation, T::expectation),
                 );
                 None
             }
@@ -600,7 +600,7 @@ impl<T: Token> Grammar for StringEqCI<T> {
         state.expect(
             pos,
             #[cfg(feature = "trace_expect")]
-            Expectation::StringEqCI(T::expectation(), T::expectation()),
+            PendingExpectation::StringEqCI(T::expectation, T::expectation),
         );
         true
     }
