@@ -52,13 +52,11 @@ struct Elements(VecSep<Suffix<Element, Ws>, Suffix<StringEq!(","), Ws>>);
 struct String(Wrap<StringEq!("\""), Range<PhantomData<Characters>>, StringEq!("\"")>);
 
 #[derive(Grammar, Debug)]
-struct Characters(Vec<Chunk>);
+struct Characters(StringOf<NormalCharacter>, Vec<EscapedRun>);
 
+/// An escape followed by the ordinary characters after it.
 #[derive(Grammar, Debug)]
-enum Chunk {
-    Run(StringOf1<NormalCharacter>),
-    Escape(Prefix<StringEq!("\\"), Escape>),
-}
+struct EscapedRun(Prefix<StringEq!("\\"), Escape>, StringOf<NormalCharacter>);
 
 const_char_class!(AsciiNormal, "0x20-0x7F except for \" and \\", |c| {
     matches!(c, ' '..='\u{7F}') && c != '"' && c != '\\'
@@ -157,8 +155,8 @@ fn main() -> ExitCode {
                 "{}",
                 bnf_rules![
                     Json, Element, Object, Members, Member, Array, Elements, String, Characters,
-                    Chunk, Escape, Hex, Number, Nat, Digits, Digit, OneNine, Fraction, Exponent,
-                    Sign, Ws,
+                    EscapedRun, Escape, Hex, Number, Nat, Digits, Digit, OneNine, Fraction,
+                    Exponent, Sign, Ws,
                 ]
             );
             ExitCode::SUCCESS
