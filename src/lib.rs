@@ -120,6 +120,7 @@ mod grammar;
 mod olc;
 mod state;
 
+use first::First;
 use std::ops::Deref;
 
 pub use char::*;
@@ -423,8 +424,7 @@ impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
         let mut items = Vec::new();
         items.push(head);
         let mut seps = Vec::new();
-        // Same as `Vec<SepItem<S, T>>`: stop at the first `S T` that fails
-        // or matches empty.
+        // Same as `Vec<SepItem<S, T>>`: stop at the first `S T` that fails.
         loop {
             let Some((sep, after_sep)) = S::parse_at(input, pos, state.reborrow()) else {
                 break;
@@ -432,7 +432,13 @@ impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
             let Some((item, after_item)) = T::parse_at(input, after_sep, state.reborrow()) else {
                 break;
             };
-            if after_item == pos {
+            // A grammar where `S` and `T` can both match empty is not
+            // supported. As a courtesy, stop instead of looping forever when
+            // that happens; the condition is constant false otherwise.
+            if <S::First as First>::CONTAINS_NIL
+                && <T::First as First>::CONTAINS_NIL
+                && after_item == pos
+            {
                 break;
             }
             seps.push(sep);
