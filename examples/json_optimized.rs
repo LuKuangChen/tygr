@@ -58,13 +58,10 @@ struct Characters(StringOf<NormalCharacter>, Vec<EscapedRun>);
 #[derive(Grammar, Debug)]
 struct EscapedRun(Prefix<StringEq!("\\"), Escape>, StringOf<NormalCharacter>);
 
-const_char_class!(AsciiNormal, "0x20-0x7F except for \" and \\", |c| {
-    matches!(c, ' '..='\u{7F}') && c != '"' && c != '\\'
-});
 const_char_class!(
     NormalCharacter,
     "0x20-0x10FFFF except for \" and \\",
-    AsciiNormal | AnyNonAscii
+    Except<AllChars, Union<StringEq!("\"\\"), CharRange<'\0', '\x1F'>>>
 );
 
 #[derive(Grammar, Debug)]

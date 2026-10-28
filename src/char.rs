@@ -54,7 +54,7 @@ pub trait CharClass: 'static {
     const ASCII: Option<&'static [bool; 128]> = None;
 
     /// The class's answer for non-ASCII chars, when it is the same for all of
-    /// them: `Some(true)` accepts every non-ASCII char (see [`AnyNonAscii`]),
+    /// them: `Some(true)` accepts every non-ASCII char (see [`AllChars`]),
     /// `Some(false)` rejects every one. `None` (the default) means each
     /// non-ASCII char is decoded and passed to `matches`.
     const NON_ASCII: Option<bool> = None;
@@ -69,24 +69,187 @@ pub trait CharClass: 'static {
     }
 }
 
-/// The class of every non-ASCII char. Union it with an ASCII class
-/// (`const_char_class!(Name, "label", Ascii | AnyNonAscii)`) so the union accepts
-/// non-ASCII text without decoding it.
-pub struct AnyNonAscii;
+/// The class of every char. Use it with [`Except`] to name what to exclude.
+pub struct AllChars;
 
-impl CharClass for AnyNonAscii {
-    #[inline]
-    fn matches(ch: char) -> bool {
-        !ch.is_ascii()
+impl CharClass for AllChars {
+    #[inline(always)]
+    fn matches(_: char) -> bool {
+        true
     }
 
     fn name() -> &'static str {
-        "any non-ASCII char"
+        "any char"
+    }
+
+    const ASCII: Option<&'static [bool; 128]> = Some(&[true; 128]);
+
+    const NON_ASCII: Option<bool> = Some(true);
+}
+
+/// The class of no char. The identity for [`Union`].
+pub struct NoChars;
+
+impl CharClass for NoChars {
+    #[inline(always)]
+    fn matches(_: char) -> bool {
+        false
+    }
+
+    fn name() -> &'static str {
+        "no char"
     }
 
     const ASCII: Option<&'static [bool; 128]> = Some(&[false; 128]);
 
-    const NON_ASCII: Option<bool> = Some(true);
+    const NON_ASCII: Option<bool> = Some(false);
+}
+
+/// The chars from `LO` to `HI`, inclusive.
+pub struct CharRange<const LO: char, const HI: char>;
+
+impl<const LO: char, const HI: char> CharClass for CharRange<LO, HI> {
+    #[inline(always)]
+    fn matches(ch: char) -> bool {
+        LO <= ch && ch <= HI
+    }
+
+    fn name() -> &'static str {
+        "char range"
+    }
+
+    const ASCII: Option<&'static [bool; 128]> = Some(&{
+        let mut t = [false; 128];
+        let mut i = 0;
+        while i < 128 {
+            t[i] = LO as u32 <= i as u32 && i as u32 <= HI as u32;
+            i += 1;
+        }
+        t
+    });
+
+    const NON_ASCII: Option<bool> = if (HI as u32) < 0x80 {
+        Some(false)
+    } else if (LO as u32) <= 0x80 && HI == char::MAX {
+        Some(true)
+    } else {
+        None
+    };
+}
+
+/// The chars of a `StringEq!` literal, as a set: `StringEq!("\"\\")` is
+/// the class of `"` and `\\`.
+impl<T: CharList> CharClass for StringEq<T> {
+    #[inline(always)]
+    fn matches(ch: char) -> bool {
+        T::contains(ch)
+    }
+
+    fn name() -> &'static str {
+        "listed char"
+    }
+
+    const ASCII: Option<&'static [bool; 128]> = Some(&T::ASCII);
+
+    const NON_ASCII: Option<bool> = if T::ALL_ASCII { Some(false) } else { None };
+}
+
+/// A `StringEq!` chain read as a set of chars.
+#[doc(hidden)]
+pub trait CharList: 'static {
+    const ASCII: [bool; 128];
+    const ALL_ASCII: bool;
+    fn contains(ch: char) -> bool;
+}
+
+impl CharList for () {
+    const ASCII: [bool; 128] = [false; 128];
+    const ALL_ASCII: bool = true;
+    #[inline(always)]
+    fn contains(_: char) -> bool {
+        false
+    }
+}
+
+impl<const CH: char, T: CharList> CharList for CharThen<CH, T> {
+    const ASCII: [bool; 128] = {
+        let mut t = T::ASCII;
+        if (CH as u32) < 128 {
+            t[CH as usize] = true;
+        }
+        t
+    };
+    const ALL_ASCII: bool = T::ALL_ASCII && (CH as u32) < 128;
+    #[inline(always)]
+    fn contains(ch: char) -> bool {
+        ch == CH || T::contains(ch)
+    }
+}
+
+/// The chars in `A` or `B`.
+pub struct Union<A, B>(PhantomData<(A, B)>);
+
+impl<A: CharClass, B: CharClass> CharClass for Union<A, B> {
+    #[inline(always)]
+    fn matches(ch: char) -> bool {
+        A::matches(ch) || B::matches(ch)
+    }
+
+    fn name() -> &'static str {
+        A::name()
+    }
+
+    const ASCII: Option<&'static [bool; 128]> = match (A::ASCII, B::ASCII) {
+        (Some(a), Some(b)) => Some(&{
+            let mut t = [false; 128];
+            let mut i = 0;
+            while i < 128 {
+                t[i] = a[i] || b[i];
+                i += 1;
+            }
+            t
+        }),
+        _ => None,
+    };
+
+    const NON_ASCII: Option<bool> = match (A::NON_ASCII, B::NON_ASCII) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
+    };
+}
+
+/// The chars in `A` but not in `B`.
+pub struct Except<A, B>(PhantomData<(A, B)>);
+
+impl<A: CharClass, B: CharClass> CharClass for Except<A, B> {
+    #[inline(always)]
+    fn matches(ch: char) -> bool {
+        A::matches(ch) && !B::matches(ch)
+    }
+
+    fn name() -> &'static str {
+        A::name()
+    }
+
+    const ASCII: Option<&'static [bool; 128]> = match (A::ASCII, B::ASCII) {
+        (Some(a), Some(b)) => Some(&{
+            let mut t = [false; 128];
+            let mut i = 0;
+            while i < 128 {
+                t[i] = a[i] && !b[i];
+                i += 1;
+            }
+            t
+        }),
+        _ => None,
+    };
+
+    const NON_ASCII: Option<bool> = match (A::NON_ASCII, B::NON_ASCII) {
+        (Some(false), _) | (_, Some(true)) => Some(false),
+        (Some(true), Some(false)) => Some(true),
+        _ => None,
+    };
 }
 
 /// Matches exactly one character satisfying a character class.

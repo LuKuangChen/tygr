@@ -248,15 +248,21 @@ macro_rules! char_class {
 /// [`StringOf`]/[`StringOf1`] answer ASCII chars from a table. Non-ASCII chars
 /// are still decoded and passed to the predicate.
 ///
-/// A class can also be a union of other compile-time classes. Including
-/// [`AnyNonAscii`] makes the union accept non-ASCII text without decoding it:
+/// A class can also be a union of other compile-time classes, or one class
+/// built from [`AllChars`], [`NoChars`], [`CharRange`], `StringEq!` (read as
+/// the set of its chars), [`Union`] and [`Except`], which this form gives a label.
+/// When such a class settles every non-ASCII char at once, runs accept or
+/// reject non-ASCII text without decoding it:
 ///
 /// ```
 /// # use tygr::*;
 /// const_char_class!(AsciiLetter, "ASCII letter", |ch| ch.is_ascii_alphabetic());
-/// const_char_class!(Word, "letter", AsciiLetter | AnyNonAscii);
+/// const_char_class!(NonAscii, "non-ASCII char", Except<AllChars, CharRange<'\0', '\x7F'>>);
+/// const_char_class!(Word, "letter", AsciiLetter | NonAscii);
+/// const_char_class!(Plain, "plain char", Except<AllChars, Union<StringEq!("\"\\"), CharRange<'\0', '\x1F'>>>);
 ///
 /// assert_eq!(StringOf::<Word>::scan_prefix("abc日本語 rest"), Ok("abc日本語".len()));
+/// assert_eq!(StringOf::<Plain>::scan_prefix("abc日本語\"rest"), Ok("abc日本語".len()));
 /// ```
 #[macro_export]
 macro_rules! const_char_class {
@@ -282,7 +288,7 @@ macro_rules! const_char_class {
             const ASCII: Option<&'static [bool; 128]> = Some(&Self::ASCII_TABLE);
         }
     };
-    ($vis:vis $name:ident, $label:expr, $first:ty $(| $rest:ty)+) => {
+    ($vis:vis $name:ident, $label:expr, $first:ty $(| $rest:ty)*) => {
         $vis struct $name;
         impl $name {
             const ASCII_TABLE: [bool; 128] = {
@@ -292,7 +298,7 @@ macro_rules! const_char_class {
                         None => panic!("const_char_class! unions need compile-time classes"),
                     }
                 }
-                let parts = [part(<$first as $crate::CharClass>::ASCII) $(, part(<$rest as $crate::CharClass>::ASCII))+];
+                let parts = [part(<$first as $crate::CharClass>::ASCII) $(, part(<$rest as $crate::CharClass>::ASCII))*];
                 let mut t = [false; 128];
                 let mut i = 0;
                 while i < 128 {
@@ -308,7 +314,7 @@ macro_rules! const_char_class {
             // Some(true) if any part accepts all non-ASCII, Some(false) if
             // every part rejects all of it, otherwise decided per char.
             const NON_ASCII_ANSWER: Option<bool> = {
-                let parts = [<$first as $crate::CharClass>::NON_ASCII $(, <$rest as $crate::CharClass>::NON_ASCII)+];
+                let parts = [<$first as $crate::CharClass>::NON_ASCII $(, <$rest as $crate::CharClass>::NON_ASCII)*];
                 let mut any_true = false;
                 let mut all_false = true;
                 let mut k = 0;
@@ -326,7 +332,7 @@ macro_rules! const_char_class {
         impl $crate::CharClass for $name {
             #[inline]
             fn matches(ch: char) -> bool {
-                <$first as $crate::CharClass>::matches(ch) $(|| <$rest as $crate::CharClass>::matches(ch))+
+                <$first as $crate::CharClass>::matches(ch) $(|| <$rest as $crate::CharClass>::matches(ch))*
             }
             fn name() -> &'static str { $label }
             const ASCII: Option<&'static [bool; 128]> = Some(&Self::ASCII_TABLE);
