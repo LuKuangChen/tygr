@@ -48,24 +48,123 @@ pub trait CharClass: 'static {
     /// Human-readable label (used in error messages and BNF).
     fn name() -> &'static str;
 
-    /// The class's answer for every ASCII char, when it is known at compile
-    /// time (see [`const_char_class!`](crate::const_char_class)). `None` (the default)
-    /// means ASCII chars are decided by calling `matches`.
-    const ASCII: Option<&'static [bool; 128]> = None;
+    /// For each byte, the answer for every char whose UTF-8 encoding starts
+    /// with it: all match, none do, or decode and call `matches`. Computed by
+    /// [`const_char_class!`](crate::const_char_class) and the set types
+    /// ([`AllChars`], [`Except`], ...); the default decodes every char.
+    #[doc(hidden)]
+    const LEAD_BYTES: [Lead; 256] = lead::CHECK;
+}
 
-    /// The class's answer for non-ASCII chars, when it is the same for all of
-    /// them: `Some(true)` accepts every non-ASCII char (see [`AllChars`]),
-    /// `Some(false)` rejects every one. `None` (the default) means each
-    /// non-ASCII char is decoded and passed to `matches`.
-    const NON_ASCII: Option<bool> = None;
+/// What a char class says about every char that starts with a given byte.
+#[doc(hidden)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lead {
+    /// Every such char is in the class.
+    Accept,
+    /// No such char is, or the byte never starts a char.
+    Reject,
+    /// Some are: decode the char and call `matches`.
+    Check,
+}
 
-    /// `matches` for an ASCII byte, from the compile-time table when there is one.
-    #[inline(always)]
-    fn matches_ascii(x: u8) -> bool {
-        match Self::ASCII {
-            Some(t) => t[(x & 0x7F) as usize],
-            None => Self::matches(x as char),
+/// Compile-time construction of [`CharClass::LEAD_BYTES`] tables.
+#[doc(hidden)]
+pub mod lead {
+    use super::Lead::{self, *};
+
+    /// The chars (as an inclusive range of scalar values) whose UTF-8
+    /// encoding starts with byte `b`, if any.
+    pub const fn span(b: u8) -> Option<(u32, u32)> {
+        let b32 = b as u32;
+        match b {
+            0x00..=0x7F => Some((b32, b32)),
+            0xC2..=0xDF => Some(((b32 & 0x1F) << 6, ((b32 & 0x1F) << 6) | 0x3F)),
+            0xE0 => Some((0x800, 0xFFF)),
+            0xED => Some((0xD000, 0xD7FF)),
+            0xE1..=0xEF => Some(((b32 & 0x0F) << 12, ((b32 & 0x0F) << 12) | 0xFFF)),
+            0xF0 => Some((0x10000, 0x3FFFF)),
+            0xF1..=0xF3 => Some(((b32 & 0x07) << 18, ((b32 & 0x07) << 18) | 0x3FFFF)),
+            0xF4 => Some((0x100000, 0x10FFFF)),
+            _ => None,
         }
+    }
+
+    const fn fill(answer: Lead) -> [Lead; 256] {
+        let mut t = [Reject; 256];
+        let mut i = 0;
+        while i < 256 {
+            if span(i as u8).is_some() {
+                t[i] = answer;
+            }
+            i += 1;
+        }
+        t
+    }
+
+    pub const ACCEPT: [Lead; 256] = fill(Accept);
+    pub const REJECT: [Lead; 256] = fill(Reject);
+    pub const CHECK: [Lead; 256] = fill(Check);
+
+    /// The chars from `lo` to `hi`, inclusive.
+    pub const fn range(lo: char, hi: char) -> [Lead; 256] {
+        let (lo, hi) = (lo as u32, hi as u32);
+        let mut t = [Reject; 256];
+        let mut i = 0;
+        while i < 256 {
+            if let Some((a, b)) = span(i as u8) {
+                t[i] = if lo <= a && b <= hi {
+                    Accept
+                } else if b < lo || hi < a {
+                    Reject
+                } else {
+                    Check
+                };
+            }
+            i += 1;
+        }
+        t
+    }
+
+    pub const fn union(a: &[Lead; 256], b: &[Lead; 256]) -> [Lead; 256] {
+        let mut t = [Reject; 256];
+        let mut i = 0;
+        while i < 256 {
+            t[i] = match (a[i], b[i]) {
+                (Accept, _) | (_, Accept) => Accept,
+                (Reject, Reject) => Reject,
+                _ => Check,
+            };
+            i += 1;
+        }
+        t
+    }
+
+    pub const fn except(a: &[Lead; 256], b: &[Lead; 256]) -> [Lead; 256] {
+        let mut t = [Reject; 256];
+        let mut i = 0;
+        while i < 256 {
+            t[i] = match (a[i], b[i]) {
+                (Reject, _) | (_, Accept) => Reject,
+                (Accept, Reject) => Accept,
+                _ => Check,
+            };
+            i += 1;
+        }
+        t
+    }
+
+    /// `t` with the chars that start with byte `b` added: settled if `b`
+    /// starts only this one char, otherwise checked.
+    pub const fn with_char(mut t: [Lead; 256], c: char) -> [Lead; 256] {
+        let mut buf = [0u8; 4];
+        let b = c.encode_utf8(&mut buf).as_bytes()[0] as usize;
+        t[b] = match (t[b], span(b as u8)) {
+            (Accept, _) => Accept,
+            (_, Some((a, z))) if a == z => Accept,
+            _ => Check,
+        };
+        t
     }
 }
 
@@ -82,9 +181,7 @@ impl CharClass for AllChars {
         "any char"
     }
 
-    const ASCII: Option<&'static [bool; 128]> = Some(&[true; 128]);
-
-    const NON_ASCII: Option<bool> = Some(true);
+    const LEAD_BYTES: [Lead; 256] = lead::ACCEPT;
 }
 
 /// The class of no char. The identity for [`Union`].
@@ -100,9 +197,7 @@ impl CharClass for NoChars {
         "no char"
     }
 
-    const ASCII: Option<&'static [bool; 128]> = Some(&[false; 128]);
-
-    const NON_ASCII: Option<bool> = Some(false);
+    const LEAD_BYTES: [Lead; 256] = lead::REJECT;
 }
 
 /// The chars from `LO` to `HI`, inclusive.
@@ -118,23 +213,7 @@ impl<const LO: char, const HI: char> CharClass for CharRange<LO, HI> {
         "char range"
     }
 
-    const ASCII: Option<&'static [bool; 128]> = Some(&{
-        let mut t = [false; 128];
-        let mut i = 0;
-        while i < 128 {
-            t[i] = LO as u32 <= i as u32 && i as u32 <= HI as u32;
-            i += 1;
-        }
-        t
-    });
-
-    const NON_ASCII: Option<bool> = if (HI as u32) < 0x80 {
-        Some(false)
-    } else if (LO as u32) <= 0x80 && HI == char::MAX {
-        Some(true)
-    } else {
-        None
-    };
+    const LEAD_BYTES: [Lead; 256] = lead::range(LO, HI);
 }
 
 /// The chars of a `StringEq!` literal, as a set: `StringEq!("\"\\")` is
@@ -149,22 +228,18 @@ impl<T: CharList> CharClass for StringEq<T> {
         "listed char"
     }
 
-    const ASCII: Option<&'static [bool; 128]> = Some(&T::ASCII);
-
-    const NON_ASCII: Option<bool> = if T::ALL_ASCII { Some(false) } else { None };
+    const LEAD_BYTES: [Lead; 256] = T::LEAD_BYTES;
 }
 
 /// A `StringEq!` chain read as a set of chars.
 #[doc(hidden)]
 pub trait CharList: 'static {
-    const ASCII: [bool; 128];
-    const ALL_ASCII: bool;
+    const LEAD_BYTES: [Lead; 256];
     fn contains(ch: char) -> bool;
 }
 
 impl CharList for () {
-    const ASCII: [bool; 128] = [false; 128];
-    const ALL_ASCII: bool = true;
+    const LEAD_BYTES: [Lead; 256] = lead::REJECT;
     #[inline(always)]
     fn contains(_: char) -> bool {
         false
@@ -172,14 +247,7 @@ impl CharList for () {
 }
 
 impl<const CH: char, T: CharList> CharList for CharThen<CH, T> {
-    const ASCII: [bool; 128] = {
-        let mut t = T::ASCII;
-        if (CH as u32) < 128 {
-            t[CH as usize] = true;
-        }
-        t
-    };
-    const ALL_ASCII: bool = T::ALL_ASCII && (CH as u32) < 128;
+    const LEAD_BYTES: [Lead; 256] = lead::with_char(T::LEAD_BYTES, CH);
     #[inline(always)]
     fn contains(ch: char) -> bool {
         ch == CH || T::contains(ch)
@@ -199,24 +267,7 @@ impl<A: CharClass, B: CharClass> CharClass for Union<A, B> {
         A::name()
     }
 
-    const ASCII: Option<&'static [bool; 128]> = match (A::ASCII, B::ASCII) {
-        (Some(a), Some(b)) => Some(&{
-            let mut t = [false; 128];
-            let mut i = 0;
-            while i < 128 {
-                t[i] = a[i] || b[i];
-                i += 1;
-            }
-            t
-        }),
-        _ => None,
-    };
-
-    const NON_ASCII: Option<bool> = match (A::NON_ASCII, B::NON_ASCII) {
-        (Some(true), _) | (_, Some(true)) => Some(true),
-        (Some(false), Some(false)) => Some(false),
-        _ => None,
-    };
+    const LEAD_BYTES: [Lead; 256] = lead::union(&A::LEAD_BYTES, &B::LEAD_BYTES);
 }
 
 /// The chars in `A` but not in `B`.
@@ -232,24 +283,7 @@ impl<A: CharClass, B: CharClass> CharClass for Except<A, B> {
         A::name()
     }
 
-    const ASCII: Option<&'static [bool; 128]> = match (A::ASCII, B::ASCII) {
-        (Some(a), Some(b)) => Some(&{
-            let mut t = [false; 128];
-            let mut i = 0;
-            while i < 128 {
-                t[i] = a[i] && !b[i];
-                i += 1;
-            }
-            t
-        }),
-        _ => None,
-    };
-
-    const NON_ASCII: Option<bool> = match (A::NON_ASCII, B::NON_ASCII) {
-        (Some(false), _) | (_, Some(true)) => Some(false),
-        (Some(true), Some(false)) => Some(true),
-        _ => None,
-    };
+    const LEAD_BYTES: [Lead; 256] = lead::except(&A::LEAD_BYTES, &B::LEAD_BYTES);
 }
 
 /// Matches exactly one character satisfying a character class.
@@ -297,19 +331,20 @@ impl<M: CharClass> Grammar for CharOf<M> {
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Option<(Self, usize)> {
         let ch = match input.as_bytes().get(pos) {
-            // If ASCII, skips &str invariant checks
-            Some(&b) if b < 0x80 => {
-                if M::matches(b as char) {
-                    Some((b as char, 1))
-                } else {
-                    None
+            // A one-byte char: asking the (inlined) predicate is as cheap as
+            // a table lookup.
+            Some(&b) if b < 0x80 => M::matches(b as char).then_some((b as char, 1)),
+            Some(&b) => match M::LEAD_BYTES[b as usize] {
+                Lead::Reject => None,
+                answer => {
+                    let c = decode_at(input, pos, b);
+                    if answer == Lead::Accept || M::matches(c) {
+                        Some((c, c.len_utf8()))
+                    } else {
+                        None
+                    }
                 }
-            }
-            Some(_) => input[pos..]
-                .chars()
-                .next()
-                .filter(|c: &char| M::matches(*c))
-                .map(|c| (c, c.len_utf8())),
+            },
             None => None,
         };
         if let Some((ch, len)) = ch {
@@ -352,51 +387,61 @@ impl<M: CharClass> Grammar for CharOf<M> {
     }
 }
 
+/// The char starting at byte `pos`, whose first byte is `b`.
+#[inline(always)]
+fn decode_at(input: &str, pos: usize, b: u8) -> char {
+    if b < 0x80 {
+        // One-byte char: skip `str`'s boundary check.
+        b as char
+    } else {
+        input[pos..].chars().next().unwrap()
+    }
+}
+
 /// Length of the longest run of chars in class `C` starting at `pos`.
 #[inline(always)]
 fn scan_run<C: CharClass>(input: &str, mut pos: usize) -> usize {
     let b = input.as_bytes();
-    // Per-byte answers, derived at compile time: ASCII bytes from `ASCII`
-    // (or `matches` when the class has no table), and bytes >= 0x80 accepted
-    // only when every non-ASCII char is (`NON_ASCII == Some(true)`).
-    let accepts: &[bool; 256] = &const {
+    // Bytes that start only accepted chars, plus continuation bytes: the
+    // loop meets one only right after accepting the byte before it, which
+    // was part of the same char. So an accepted char is consumed a byte at a
+    // time, and the run stops only where a char starts.
+    let accept: &[bool; 256] = &const {
         let mut t = [false; 256];
-        if let Some(ascii) = C::ASCII {
-            let mut i = 0;
-            while i < 128 {
-                t[i] = ascii[i];
-                i += 1;
-            }
-        }
-        if let Some(true) = C::NON_ASCII {
-            let mut i = 128;
-            while i < 256 {
-                t[i] = true;
-                i += 1;
-            }
+        let mut i = 0;
+        while i < 256 {
+            t[i] = matches!(C::LEAD_BYTES[i], Lead::Accept) || (0x80 <= i && i < 0xC0);
+            i += 1;
         }
         t
     };
+    let check: &[bool; 256] = &const {
+        let mut t = [false; 256];
+        let mut i = 0;
+        while i < 256 {
+            t[i] = matches!(C::LEAD_BYTES[i], Lead::Check);
+            i += 1;
+        }
+        t
+    };
+    let any_check = const {
+        let mut any = false;
+        let mut i = 0;
+        while i < 256 {
+            any = any || matches!(C::LEAD_BYTES[i], Lead::Check);
+            i += 1;
+        }
+        any
+    };
     while let Some(&x) = b.get(pos) {
-        // Optimistic: the byte is in the class.
-        let hit = match C::ASCII {
-            Some(_) => accepts[x as usize],
-            None => x < 0x80 && C::matches(x as char),
-        };
-        if hit {
+        if accept[x as usize] {
             pos += 1;
             continue;
         }
-        // ASCII not in the class: the run ends.
-        if x < 0x80 {
+        if !any_check || !check[x as usize] {
             break;
         }
-        // A non-ASCII char the table didn't accept: decode and ask, unless
-        // the class rejects every non-ASCII char.
-        if C::NON_ASCII == Some(false) {
-            break;
-        }
-        let c = input[pos..].chars().next().unwrap();
+        let c = decode_at(input, pos, x);
         if !C::matches(c) {
             break;
         }

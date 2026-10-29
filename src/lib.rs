@@ -241,24 +241,19 @@ macro_rules! char_class {
     };
 }
 
-/// Like [`char_class!`], but the class's ASCII answers are known at compile
-/// time: the predicate must be usable in a `const fn` (comparisons,
-/// `matches!`, `is_ascii_*`, ...), which the compiler enforces. In return the
-/// class gets an exact FIRST set on ASCII, and runs in
-/// [`StringOf`]/[`StringOf1`] answer ASCII chars from a table. Non-ASCII chars
-/// are still decoded and passed to the predicate.
+/// Like [`char_class!`], but the predicate must be usable in a `const fn`
+/// (comparisons, `matches!`, `is_ascii_*`, ...), which the compiler enforces.
+/// In return tygr works out at compile time which bytes can start a matching
+/// char, for exact FIRST sets and faster runs in [`StringOf`]/[`StringOf1`].
 ///
-/// A class can also be a union of other compile-time classes, or one class
-/// built from [`AllChars`], [`NoChars`], [`CharRange`], `StringEq!` (read as
-/// the set of its chars), [`Union`] and [`Except`], which this form gives a label.
-/// When such a class settles every non-ASCII char at once, runs accept or
-/// reject non-ASCII text without decoding it:
+/// A class can also be a union of classes, or one class built from
+/// [`AllChars`], [`NoChars`], [`CharRange`], `StringEq!` (read as the set of
+/// its chars), [`Union`] and [`Except`], which this form gives a label:
 ///
 /// ```
 /// # use tygr::*;
 /// const_char_class!(AsciiLetter, "ASCII letter", |ch| ch.is_ascii_alphabetic());
-/// const_char_class!(NonAscii, "non-ASCII char", Except<AllChars, CharRange<'\0', '\x7F'>>);
-/// const_char_class!(Word, "letter", AsciiLetter | NonAscii);
+/// const_char_class!(Word, "letter", AsciiLetter | CharRange<'\u{80}', { char::MAX }>);
 /// const_char_class!(Plain, "plain char", Except<AllChars, Union<StringEq!("\"\\"), CharRange<'\0', '\x1F'>>>);
 ///
 /// assert_eq!(StringOf::<Word>::scan_prefix("abc日本語 rest"), Ok("abc日本語".len()));
@@ -271,72 +266,54 @@ macro_rules! const_char_class {
         impl $name {
             #[allow(dead_code)]
             const fn matches_const($ch: char) -> bool { $pred }
-            const ASCII_TABLE: [bool; 128] = {
-                let mut t = [false; 128];
-                let mut i = 0;
-                while i < 128 {
-                    t[i] = Self::matches_const(i as u8 as char);
-                    i += 1;
-                }
-                t
-            };
         }
         impl $crate::CharClass for $name {
             #[inline]
             fn matches($ch: char) -> bool { Self::matches_const($ch) }
             fn name() -> &'static str { $label }
-            const ASCII: Option<&'static [bool; 128]> = Some(&Self::ASCII_TABLE);
-        }
-    };
-    ($vis:vis $name:ident, $label:expr, $first:ty $(| $rest:ty)*) => {
-        $vis struct $name;
-        impl $name {
-            const ASCII_TABLE: [bool; 128] = {
-                const fn part(t: Option<&'static [bool; 128]>) -> &'static [bool; 128] {
-                    match t {
-                        Some(t) => t,
-                        None => panic!("const_char_class! unions need compile-time classes"),
-                    }
-                }
-                let parts = [part(<$first as $crate::CharClass>::ASCII) $(, part(<$rest as $crate::CharClass>::ASCII))*];
-                let mut t = [false; 128];
+            // Settle each byte that starts at most 64 chars by trying them
+            // all; chars of three or four bytes are checked when met.
+            const LEAD_BYTES: [$crate::Lead; 256] = {
+                let mut t = $crate::lead::REJECT;
                 let mut i = 0;
-                while i < 128 {
-                    let mut k = 0;
-                    while k < parts.len() {
-                        t[i] = t[i] || parts[k][i];
-                        k += 1;
+                while i < 256 {
+                    if let Some((lo, hi)) = $crate::lead::span(i as u8) {
+                        t[i] = if hi - lo < 64 {
+                            let (mut any, mut all) = (false, true);
+                            let mut c = lo;
+                            while c <= hi {
+                                let m = match char::from_u32(c) {
+                                    Some(ch) => Self::matches_const(ch),
+                                    None => false,
+                                };
+                                any = any || m;
+                                all = all && m;
+                                c += 1;
+                            }
+                            if all { $crate::Lead::Accept } else if any { $crate::Lead::Check } else { $crate::Lead::Reject }
+                        } else {
+                            $crate::Lead::Check
+                        };
                     }
                     i += 1;
                 }
                 t
             };
-            // Some(true) if any part accepts all non-ASCII, Some(false) if
-            // every part rejects all of it, otherwise decided per char.
-            const NON_ASCII_ANSWER: Option<bool> = {
-                let parts = [<$first as $crate::CharClass>::NON_ASCII $(, <$rest as $crate::CharClass>::NON_ASCII)*];
-                let mut any_true = false;
-                let mut all_false = true;
-                let mut k = 0;
-                while k < parts.len() {
-                    match parts[k] {
-                        Some(true) => any_true = true,
-                        Some(false) => {}
-                        None => all_false = false,
-                    }
-                    k += 1;
-                }
-                if any_true { Some(true) } else if all_false { Some(false) } else { None }
-            };
         }
+    };
+    ($vis:vis $name:ident, $label:expr, $first:ty $(| $rest:ty)*) => {
+        $vis struct $name;
         impl $crate::CharClass for $name {
             #[inline]
             fn matches(ch: char) -> bool {
                 <$first as $crate::CharClass>::matches(ch) $(|| <$rest as $crate::CharClass>::matches(ch))*
             }
             fn name() -> &'static str { $label }
-            const ASCII: Option<&'static [bool; 128]> = Some(&Self::ASCII_TABLE);
-            const NON_ASCII: Option<bool> = Self::NON_ASCII_ANSWER;
+            const LEAD_BYTES: [$crate::Lead; 256] = {
+                let t = <$first as $crate::CharClass>::LEAD_BYTES;
+                $(let t = $crate::lead::union(&t, &<$rest as $crate::CharClass>::LEAD_BYTES);)*
+                t
+            };
         }
     };
 }

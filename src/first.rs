@@ -83,9 +83,8 @@ impl First for AnyChar {
     const CONTAINS_NIL: bool = false;
 }
 
-/// The [`First`] of one char from class `M`: exact on ASCII when the class
-/// knows its ASCII answers at compile time ([`CharClass::ASCII`]), and every
-/// non-ASCII lead byte unless the class rejects all non-ASCII chars.
+/// The [`First`] of one char from class `M`: the bytes its chars can start
+/// with ([`CharClass::LEAD_BYTES`](crate::CharClass::LEAD_BYTES)).
 #[doc(hidden)]
 pub struct ClassFirst<M>(PhantomData<M>);
 impl<M: crate::CharClass> ByteSet for ClassFirst<M> {}
@@ -103,20 +102,11 @@ impl<M: crate::CharClass> First for ClassFirst<M> {
     type WithCharCI<const D: char> = AddCharCI<Self, D>;
 
     const CONTAINS_BYTE: [bool; 256] = {
-        let mut map = [true; 256];
-        if let Some(ascii) = M::ASCII {
-            let mut i = 0;
-            while i < 0x80 {
-                map[i] = ascii[i];
-                i += 1;
-            }
-        }
-        if let Some(false) = M::NON_ASCII {
-            let mut i = 0x80;
-            while i < 256 {
-                map[i] = false;
-                i += 1;
-            }
+        let mut map = [false; 256];
+        let mut i = 0;
+        while i < 256 {
+            map[i] = !matches!(M::LEAD_BYTES[i], crate::Lead::Reject);
+            i += 1;
         }
         map
     };
