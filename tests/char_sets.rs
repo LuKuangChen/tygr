@@ -89,3 +89,31 @@ fn runs_use_the_classes() {
     assert_eq!(StringOf::<NonAscii>::scan_prefix("日本a"), Ok("日本".len()));
     assert!(StringOf1::<NoChars>::scan_prefix("a").is_err());
 }
+
+/// The byte path (`has_char_at`) agrees with `matches` on every char.
+fn agrees<C: CharClass>() {
+    let mut buf = String::new();
+    for ch in (0..=char::MAX as u32).filter_map(char::from_u32) {
+        buf.clear();
+        buf.push(ch);
+        assert_eq!(
+            C::has_char_at(&buf, 0, buf.as_bytes()[0]),
+            C::matches(ch),
+            "{} at {ch:?}",
+            std::any::type_name::<C>()
+        );
+    }
+}
+
+#[test]
+fn bytes_agree_with_chars() {
+    agrees::<Greek>();
+    agrees::<Plain>();
+    agrees::<NonAscii>();
+    agrees::<CharRange<'\u{7F0}', '\u{10023}'>>();
+    agrees::<CharRange<'\u{D000}', '\u{F000}'>>();
+    agrees::<CharRange<'é', '😀'>>();
+    agrees::<StringEq!("aé日😀")>();
+    agrees::<Except<CharRange<'\u{100}', '\u{FFFF}'>, Union<Greek, StringEq!("日é")>>>();
+    agrees::<Latin1Letter>();
+}

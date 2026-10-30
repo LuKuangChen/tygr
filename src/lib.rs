@@ -271,6 +271,19 @@ macro_rules! const_char_class {
             #[inline]
             fn matches($ch: char) -> bool { Self::matches_const($ch) }
             fn name() -> &'static str { $label }
+            // A one-byte char: the inlined predicate is cheaper than a table load.
+            #[inline(always)]
+            fn has_char_at(input: &str, pos: usize, b: u8) -> bool {
+                if b < 0x80 {
+                    Self::matches_const(b as char)
+                } else {
+                    match Self::LEAD_BYTES[b as usize] {
+                        $crate::Lead::Accept => true,
+                        $crate::Lead::Reject => false,
+                        $crate::Lead::Check => <Self as $crate::CharClass>::check_at(input, pos),
+                    }
+                }
+            }
             // Settle each byte that starts at most 64 chars by trying them
             // all; chars of three or four bytes are checked when met.
             const LEAD_BYTES: [$crate::Lead; 256] = {
@@ -309,6 +322,11 @@ macro_rules! const_char_class {
                 <$first as $crate::CharClass>::matches(ch) $(|| <$rest as $crate::CharClass>::matches(ch))*
             }
             fn name() -> &'static str { $label }
+            #[inline(always)]
+            fn check_at(input: &str, pos: usize) -> bool {
+                let b = input.as_bytes()[pos];
+                <$first as $crate::CharClass>::has_char_at(input, pos, b) $(|| <$rest as $crate::CharClass>::has_char_at(input, pos, b))*
+            }
             const LEAD_BYTES: [$crate::Lead; 256] = {
                 let t = <$first as $crate::CharClass>::LEAD_BYTES;
                 $(let t = $crate::lead::union(&t, &<$rest as $crate::CharClass>::LEAD_BYTES);)*
