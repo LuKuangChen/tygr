@@ -83,6 +83,37 @@ impl First for AnyChar {
     const CONTAINS_NIL: bool = false;
 }
 
+/// The [`First`] of one char from class `M`: the bytes its chars can start
+/// with ([`CharClass::LEAD_BYTES`](crate::CharClass::LEAD_BYTES)).
+#[doc(hidden)]
+pub struct ClassFirst<M>(PhantomData<M>);
+impl<M: crate::CharClass> ByteSet for ClassFirst<M> {}
+impl<M: crate::CharClass> First for ClassFirst<M> {
+    type Concat<G: Grammar> = Self;
+
+    type Union<X: First> = X::UnionByteSet<Self>;
+
+    type UnionByteSet<X: ByteSet> = UnionSet<Self, X>;
+
+    type Nullable = OptionalFirst<Self>;
+
+    type WithChar<const D: char> = AddChar<Self, D>;
+
+    type WithCharCI<const D: char> = AddCharCI<Self, D>;
+
+    const CONTAINS_BYTE: [bool; 256] = {
+        let mut map = [false; 256];
+        let mut i = 0;
+        while i < 256 {
+            map[i] = !matches!(M::LEAD_BYTES[i], crate::Lead::Reject);
+            i += 1;
+        }
+        map
+    };
+
+    const CONTAINS_NIL: bool = false;
+}
+
 #[doc(hidden)]
 pub struct AddChar<B: ByteSet, const C: char>(PhantomData<B>);
 impl<B: ByteSet, const C: char> ByteSet for AddChar<B, C> {}

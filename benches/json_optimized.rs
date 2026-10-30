@@ -8,7 +8,6 @@ use std::hint::black_box;
 use std::marker::PhantomData;
 use std::time::Instant;
 
-use either::Either;
 use tygr::*;
 
 #[derive(Grammar)]
@@ -48,17 +47,17 @@ struct Elements(VecSep<Suffix<Element, Ws>, Suffix<StringEq!(","), Ws>>);
 struct String(Wrap<StringEq!("\""), Characters, StringEq!("\"")>);
 
 #[derive(Grammar)]
-struct Characters(Vec<Character>);
+struct Characters(StringOf<NormalCharacter>, Vec<EscapedRun>);
 
+/// An escape followed by the ordinary characters after it.
 #[derive(Grammar)]
-enum Character {
-    Normal(CharOf<NormalCharacter>),
-    Escape(Prefix<StringEq!("\\"), Escape>),
-}
+struct EscapedRun(Prefix<StringEq!("\\"), Escape>, StringOf<NormalCharacter>);
 
-char_class!(NormalCharacter, "0x20-0x10FFFF except for \" and \\", |c| {
-    (0x20..=0x10FFFF).contains(&(c as u32)) && (c != '"') && c != '\\'
-});
+const_char_class!(
+    NormalCharacter,
+    "0x20-0x10FFFF except for \" and \\",
+    Except<AllChars, Union<StringEq!("\"\\"), CharRange<'\0', '\x1F'>>>
+);
 
 #[derive(Grammar)]
 enum Escape {
@@ -75,6 +74,7 @@ enum Escape {
         hex1: Hex,
         hex2: Hex,
         hex3: Hex,
+        hex4: Hex,
     },
 }
 
@@ -85,8 +85,8 @@ enum Hex {
     LAToF(CharOf<LAToF>),
 }
 
-char_class!(UAToF, "A-F", |c| ('A'..='F').contains(&c));
-char_class!(LAToF, "a-f", |c| ('a'..='f').contains(&c));
+const_char_class!(UAToF, "A-F", |c| matches!(c, 'A'..='F'));
+const_char_class!(LAToF, "a-f", |c| matches!(c, 'a'..='f'));
 
 #[derive(Grammar)]
 struct Number {
@@ -98,38 +98,31 @@ struct Number {
 
 #[derive(Grammar)]
 enum Nat {
-    Zero(StringEq!("0")),
     Pos(OneNine, Option<Digits>),
+    Zero(StringEq!("0")),
 }
 
 #[derive(Grammar)]
 struct Digits(Vec<Digit>);
 
 #[derive(Grammar)]
-enum Digit {
-    Zero(StringEq!("0")),
-    OneNine(OneNine),
-}
+struct Digit(CharOf<DigitClass>);
+
+const_char_class!(DigitClass, "0-9", |c| c.is_ascii_digit());
 
 #[derive(Grammar)]
-enum OneNine {
-    D1(StringEq!("1")),
-    D2(StringEq!("2")),
-    D3(StringEq!("3")),
-    D4(StringEq!("4")),
-    D5(StringEq!("5")),
-    D6(StringEq!("6")),
-    D7(StringEq!("7")),
-    D8(StringEq!("8")),
-    D9(StringEq!("9")),
-}
+struct OneNine(CharOf<OneNineClass>);
+
+const_char_class!(OneNineClass, "1-9", |c| matches!(c, '1'..='9'));
+
+const_char_class!(EClass, "e or E", |c| c == 'e' || c == 'E');
 
 #[derive(Grammar)]
 struct Fraction(Prefix<StringEq!("."), Digits>);
 
 #[derive(Grammar)]
 struct Exponent {
-    e: Either<StringEq!("E"), StringEq!("e")>,
+    e: CharOf<EClass>,
     sign: Option<Sign>,
     digits: Digits,
 }
@@ -141,16 +134,12 @@ enum Sign {
 }
 
 #[derive(Grammar)]
-struct Ws(PhantomData<Vec<W>>);
+struct Ws(PhantomData<StringOf<WsClass>>);
 
-#[derive(Grammar)]
-#[grammar(inline)]
-enum W {
-    C0020(StringEq!("\u{0020}")),
-    C000A(StringEq!("\u{000A}")),
-    C000D(StringEq!("\u{000D}")),
-    C0009(StringEq!("\u{0009}")),
-}
+const_char_class!(WsClass, "JSON whitespace", |c| matches!(
+    c,
+    ' ' | '\n' | '\r' | '\t'
+));
 
 const CANADA: &str = include_str!("../data/canada.json");
 const DATA: &str = include_str!("../data/data.json");

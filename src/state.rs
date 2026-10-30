@@ -1,4 +1,4 @@
-#[cfg(feature = "trace_one_node")]
+#[cfg(feature = "trace_expect")]
 use core::str;
 #[cfg(feature = "trace_pos")]
 use std::cmp::Ordering;
@@ -61,14 +61,14 @@ impl<'a> State<'a> {
     pub fn expect(
         &mut self,
         other_pos: usize,
-        #[cfg(feature = "trace_one_node")] expectation: Expectation,
+        #[cfg(feature = "trace_expect")] expectation: impl Into<PendingExpectation>,
     ) {
         self.history.expect(
             #[cfg(feature = "trace_one_node")]
             self.context,
             other_pos,
-            #[cfg(feature = "trace_one_node")]
-            expectation,
+            #[cfg(feature = "trace_expect")]
+            expectation.into(),
         );
     }
 
@@ -89,8 +89,16 @@ impl<'a> State<'a> {
 #[cfg(feature = "trace_pos")]
 #[derive(std::fmt::Debug, Default)]
 pub(crate) struct History {
-    #[cfg(feature = "trace_one_node")]
-    traces: Vec<Trace>,
+    /// What was expected at `pos`, not yet turned into [`Trace`]s: building
+    /// an [`Expectation`] allocates, and most are discarded when a later
+    /// failure goes farther, so that waits for [`History::into_error`].
+    #[cfg(feature = "trace_expect")]
+    traces: Vec<PendingTrace>,
+    /// Expectations that arrived already built (conversion and validation
+    /// failures, which are rare), referred to by index from `traces`, so that
+    /// `traces` holds nothing with a destructor and clearing it is free.
+    #[cfg(feature = "trace_expect")]
+    ready: Vec<Expectation>,
     #[cfg(feature = "trace_pos")]
     pos: usize,
 }
@@ -102,16 +110,16 @@ impl History {
     }
 
     pub(crate) fn into_error(self) -> Error {
-        #[cfg(feature = "trace_one_node")]
+        #[cfg(feature = "trace_expect")]
         let traces = {
-            let mut traces = self.traces;
-            for trace in &mut traces {
-                trace.context.reverse()
-            }
-            traces
+            let mut ready: Vec<Option<Expectation>> = self.ready.into_iter().map(Some).collect();
+            self.traces
+                .into_iter()
+                .map(|t| t.force(&mut ready))
+                .collect()
         };
         Error {
-            #[cfg(feature = "trace_one_node")]
+            #[cfg(feature = "trace_expect")]
             traces,
             #[cfg(feature = "trace_pos")]
             pos: self.pos,
@@ -150,7 +158,7 @@ pub enum Expectation {
     },
 }
 
-#[cfg(feature = "trace_one_node")]
+#[cfg(feature = "trace_expect")]
 fn escape_string(s: &str) -> String {
     s.chars()
         .map(|char| match char {
@@ -163,7 +171,7 @@ fn escape_string(s: &str) -> String {
         .collect()
 }
 
-#[cfg(feature = "trace_one_node")]
+#[cfg(feature = "trace_expect")]
 impl Display for Expectation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -208,6 +216,102 @@ impl Display for Expectation {
     }
 }
 
+/// An [`Expectation`] that has not been built yet. Failed literal matches are
+/// recorded as function pointers, so a failure that is later superseded costs
+/// no allocation; the strings are built only for the failures that end up in
+/// the [`Error`].
+#[cfg(feature = "trace_expect")]
+#[doc(hidden)]
+pub enum PendingExpectation {
+    /// [`Expectation::StringEq`]: the unmatched part, and the whole literal.
+    StringEq(fn() -> String, fn() -> String),
+    /// [`Expectation::StringEqCI`]: the unmatched part, and the whole literal.
+    StringEqCI(fn() -> String, fn() -> String),
+    /// [`Expectation::CharClass`].
+    CharClass(&'static str),
+    /// Already built (conversions, validations).
+    Ready(Expectation),
+}
+
+#[cfg(feature = "trace_expect")]
+impl From<Expectation> for PendingExpectation {
+    fn from(expectation: Expectation) -> Self {
+        PendingExpectation::Ready(expectation)
+    }
+}
+
+/// A recorded attempt whose [`Expectation`] and context are not built yet.
+#[cfg(feature = "trace_expect")]
+pub(crate) struct PendingTrace {
+    #[cfg(feature = "trace_one_node")]
+    context: ContextSnapshot,
+    expectation: Recorded,
+}
+
+/// A [`PendingExpectation`] as stored in [`History`]: no destructor.
+#[cfg(feature = "trace_expect")]
+#[derive(Clone, Copy)]
+enum Recorded {
+    StringEq(fn() -> String, fn() -> String),
+    StringEqCI(fn() -> String, fn() -> String),
+    CharClass(&'static str),
+    /// Index into [`History`]'s `ready` list.
+    Ready(usize),
+}
+
+#[cfg(feature = "trace_expect")]
+impl std::fmt::Debug for PendingTrace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingTrace")
+    }
+}
+
+#[cfg(feature = "trace_expect")]
+impl PendingTrace {
+    fn force(self, ready: &mut [Option<Expectation>]) -> Trace {
+        Trace {
+            #[cfg(feature = "trace_one_node")]
+            context: self.context.into_vec(),
+            #[cfg(not(feature = "trace_one_node"))]
+            context: Vec::new(),
+            expectation: match self.expectation {
+                Recorded::StringEq(partial, full) => Expectation::StringEq(partial(), full()),
+                Recorded::StringEqCI(partial, full) => Expectation::StringEqCI(partial(), full()),
+                Recorded::CharClass(name) => Expectation::CharClass(name),
+                Recorded::Ready(i) => ready[i].take().unwrap(),
+            },
+        }
+    }
+}
+
+/// The rule context of a recorded attempt: just the nearest frame, unless
+/// `trace_all_nodes` asks for the whole chain.
+#[cfg(feature = "trace_one_node")]
+#[cfg(not(feature = "trace_all_nodes"))]
+type ContextSnapshot = Option<Frame>;
+#[cfg(feature = "trace_all_nodes")]
+type ContextSnapshot = Vec<Frame>;
+
+#[cfg(feature = "trace_one_node")]
+trait IntoFrames {
+    fn into_vec(self) -> Vec<Frame>;
+}
+#[cfg(feature = "trace_one_node")]
+#[cfg(not(feature = "trace_all_nodes"))]
+impl IntoFrames for Option<Frame> {
+    fn into_vec(self) -> Vec<Frame> {
+        self.into_iter().collect()
+    }
+}
+#[cfg(feature = "trace_all_nodes")]
+impl IntoFrames for Vec<Frame> {
+    /// Collected innermost first; reported outermost first.
+    fn into_vec(mut self) -> Vec<Frame> {
+        self.reverse();
+        self
+    }
+}
+
 /// One recorded parse attempt at [`Error::pos`] — a rule call chain and what
 /// it expected to find there. Multiple `Trace`s at the same position are
 /// candidates: any one of them matching would have let the parse continue.
@@ -226,25 +330,41 @@ impl History {
         &mut self,
         #[cfg(feature = "trace_one_node")] context: Context<'_>,
         other_pos: usize,
-        #[cfg(feature = "trace_one_node")] expectation: Expectation,
+        #[cfg(feature = "trace_expect")] expectation: PendingExpectation,
     ) {
-        #[cfg(feature = "trace_one_node")]
-        let trace = || Trace {
-            context: context.to_vec(),
-            expectation,
+        #[cfg(feature = "trace_expect")]
+        let trace = |ready: &mut Vec<Expectation>| PendingTrace {
+            #[cfg(feature = "trace_one_node")]
+            context: context.snapshot(),
+            expectation: match expectation {
+                PendingExpectation::StringEq(partial, full) => Recorded::StringEq(partial, full),
+                PendingExpectation::StringEqCI(partial, full) => {
+                    Recorded::StringEqCI(partial, full)
+                }
+                PendingExpectation::CharClass(name) => Recorded::CharClass(name),
+                PendingExpectation::Ready(e) => {
+                    ready.push(e);
+                    Recorded::Ready(ready.len() - 1)
+                }
+            },
         };
         match self.pos.cmp(&other_pos) {
             Ordering::Equal => {
-                #[cfg(feature = "trace_one_node")]
+                #[cfg(feature = "trace_expect")]
                 {
-                    self.traces.push(trace())
+                    let t = trace(&mut self.ready);
+                    self.traces.push(t)
                 }
             }
             Ordering::Less => {
                 self.pos = other_pos;
-                #[cfg(feature = "trace_one_node")]
+                #[cfg(feature = "trace_expect")]
                 {
-                    self.traces = vec![trace()];
+                    // Keep the allocation: the farthest position moves often.
+                    self.traces.clear();
+                    self.ready.clear();
+                    let t = trace(&mut self.ready);
+                    self.traces.push(t);
                 }
             }
             Ordering::Greater => (),
@@ -277,7 +397,7 @@ impl<'a> Context<'a> {
     }
 
     #[cfg(feature = "trace_one_node")]
-    fn to_vec(self) -> Vec<Frame> {
+    fn snapshot(self) -> ContextSnapshot {
         #[cfg(feature = "trace_all_nodes")]
         {
             let mut result = vec![];
@@ -290,7 +410,7 @@ impl<'a> Context<'a> {
         }
         #[cfg(not(feature = "trace_all_nodes"))]
         {
-            self.0.map(|node| vec![node.first]).unwrap_or_default()
+            self.0.map(|node| node.first)
         }
     }
 
@@ -324,7 +444,7 @@ pub struct Frame {
 /// those degrade gracefully across feature configurations.
 #[derive(PartialEq, Eq)]
 pub struct Error {
-    #[cfg(feature = "trace_one_node")]
+    #[cfg(feature = "trace_expect")]
     #[doc(hidden)]
     pub traces: Vec<Trace>,
     #[cfg(feature = "trace_pos")]
@@ -346,13 +466,13 @@ pub(crate) fn make_error(#[cfg(feature = "trace_pos")] history: History) -> Erro
 
 impl Error {
     /// The candidate expectations recorded at the deepest position reached.
-    /// Empty unless `trace_one_node` is enabled.
+    /// Empty unless `trace_expect` (or `trace_one_node`) is enabled.
     pub fn traces(&self) -> &[Trace] {
-        #[cfg(feature = "trace_one_node")]
+        #[cfg(feature = "trace_expect")]
         {
             &self.traces
         }
-        #[cfg(not(feature = "trace_one_node"))]
+        #[cfg(not(feature = "trace_expect"))]
         {
             &[]
         }
@@ -378,7 +498,7 @@ impl Display for Error {
         write!(f, "parse error")?;
         #[cfg(feature = "trace_pos")]
         write!(f, " at byte {}", self.pos)?;
-        #[cfg(feature = "trace_one_node")]
+        #[cfg(feature = "trace_expect")]
         {
             let mut lines: Vec<String> = self
                 .traces
@@ -414,7 +534,7 @@ impl Display for Error {
 impl std::fmt::Debug for Error {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        #[cfg(feature = "trace_one_node")]
+        #[cfg(feature = "trace_expect")]
         {
             writeln!(f, ":{}", self.pos)?;
             writeln!(f, "Looking for")?;
