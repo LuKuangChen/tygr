@@ -53,6 +53,7 @@
 //! | `default` | Enables `trace_one_node`. |
 //! | `trace` | Enables all tracing features. |
 //! | `trace_pos` | Traces parser positions. |
+//! | `trace_expect` | Traces what was expected at the farthest position, without grammar nodes. |
 //! | `trace_one_node` | Traces only the nearest grammar node for each attempt. |
 //! | `trace_all_nodes` | Traces the complete grammar node chain for each attempt. |
 //! | `lower_bnf_name` | Converts generated BNF names to lowercase. |
@@ -119,6 +120,7 @@ mod grammar;
 mod olc;
 mod state;
 
+use first::First;
 use std::ops::Deref;
 
 pub use char::*;
@@ -239,6 +241,101 @@ macro_rules! char_class {
     };
 }
 
+/// Like [`char_class!`], but the predicate must be usable in a `const fn`
+/// (comparisons, `matches!`, `is_ascii_*`, ...), which the compiler enforces.
+/// In return tygr works out at compile time which bytes can start a matching
+/// char, for exact FIRST sets and faster runs in [`StringOf`]/[`StringOf1`].
+///
+/// A class can also be a union of classes, or one class built from
+/// [`AllChars`], [`NoChars`], [`CharRange`], `StringEq!` (read as the set of
+/// its chars), [`Union`] and [`Except`], which this form gives a label:
+///
+/// ```
+/// # use tygr::*;
+/// const_char_class!(AsciiLetter, "ASCII letter", |ch| ch.is_ascii_alphabetic());
+/// const_char_class!(Word, "letter", AsciiLetter | CharRange<'\u{80}', { char::MAX }>);
+/// const_char_class!(Plain, "plain char", Except<AllChars, Union<StringEq!("\"\\"), CharRange<'\0', '\x1F'>>>);
+///
+/// assert_eq!(StringOf::<Word>::scan_prefix("abc日本語 rest"), Ok("abc日本語".len()));
+/// assert_eq!(StringOf::<Plain>::scan_prefix("abc日本語\"rest"), Ok("abc日本語".len()));
+/// ```
+#[macro_export]
+macro_rules! const_char_class {
+    ($vis:vis $name:ident, $label:expr, |$ch:ident| $pred:expr) => {
+        $vis struct $name;
+        impl $name {
+            #[allow(dead_code)]
+            const fn matches_const($ch: char) -> bool { $pred }
+        }
+        impl $crate::CharClass for $name {
+            #[inline]
+            fn matches($ch: char) -> bool { Self::matches_const($ch) }
+            fn name() -> &'static str { $label }
+            // A one-byte char: the inlined predicate is cheaper than a table load.
+            #[inline(always)]
+            fn has_char_at(input: &[u8], pos: usize, b: u8) -> bool {
+                if b < 0x80 {
+                    Self::matches_const(b as char)
+                } else {
+                    match Self::LEAD_BYTES[b as usize] {
+                        $crate::Lead::Accept => true,
+                        $crate::Lead::Reject => false,
+                        $crate::Lead::Check => <Self as $crate::CharClass>::check_at(input, pos),
+                    }
+                }
+            }
+            // Settle each byte that starts at most 64 chars by trying them
+            // all; chars of three or four bytes are checked when met.
+            const LEAD_BYTES: [$crate::Lead; 256] = {
+                let mut t = $crate::lead::REJECT;
+                let mut i = 0;
+                while i < 256 {
+                    if let Some((lo, hi)) = $crate::lead::span(i as u8) {
+                        t[i] = if hi - lo < 64 {
+                            let (mut any, mut all) = (false, true);
+                            let mut c = lo;
+                            while c <= hi {
+                                let m = match char::from_u32(c) {
+                                    Some(ch) => Self::matches_const(ch),
+                                    None => false,
+                                };
+                                any = any || m;
+                                all = all && m;
+                                c += 1;
+                            }
+                            if all { $crate::Lead::Accept } else if any { $crate::Lead::Check } else { $crate::Lead::Reject }
+                        } else {
+                            $crate::Lead::Check
+                        };
+                    }
+                    i += 1;
+                }
+                t
+            };
+        }
+    };
+    ($vis:vis $name:ident, $label:expr, $first:ty $(| $rest:ty)*) => {
+        $vis struct $name;
+        impl $crate::CharClass for $name {
+            #[inline]
+            fn matches(ch: char) -> bool {
+                <$first as $crate::CharClass>::matches(ch) $(|| <$rest as $crate::CharClass>::matches(ch))*
+            }
+            fn name() -> &'static str { $label }
+            #[inline(always)]
+            fn check_at(input: &[u8], pos: usize) -> bool {
+                let b = input[pos];
+                <$first as $crate::CharClass>::has_char_at(input, pos, b) $(|| <$rest as $crate::CharClass>::has_char_at(input, pos, b))*
+            }
+            const LEAD_BYTES: [$crate::Lead; 256] = {
+                let t = <$first as $crate::CharClass>::LEAD_BYTES;
+                $(let t = $crate::lead::union(&t, &<$rest as $crate::CharClass>::LEAD_BYTES);)*
+                t
+            };
+        }
+    };
+}
+
 /// Post-parse validation for `#[grammar(validated)]` types.
 ///
 /// Return `false` to reject the parsed value — the parse backtracks as if
@@ -276,8 +373,7 @@ pub struct VecSepSource<T, S> {
 }
 
 /// One or more items, with a separator between each pair.
-#[derive(Debug, Clone, PartialEq, Eq, GrammarFromOther)]
-#[grammar(inline)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VecSep<T, S> {
     /// The `T` items, in order.
     pub items: Vec<T>,
@@ -310,6 +406,80 @@ impl<T: Grammar, S: Grammar> GrammarFrom for VecSep<T, S> {
             sep.print_to(buf);
             item.print_to(buf);
         }
+    }
+}
+
+// Written by hand rather than `#[derive(GrammarFromOther)]` only so that
+// `parse_at` can push straight into `items`/`seps`: going through
+// `VecSepSource` would box the head, build `rest`, then copy everything into
+// two fresh vectors. Everything else delegates to `VecSepSource`, exactly as
+// the derive (with `#[grammar(inline)]`) would.
+impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
+    type First = <VecSepSource<T, S> as Grammar>::First;
+
+    #[inline]
+    fn parse_at(input: &[u8], pos: usize, mut state: State) -> Option<(Self, usize)> {
+        let (head, mut pos) = T::parse_at(input, pos, state.reborrow())?;
+        // Not `vec![head]`: that allocates room for exactly one item, so a
+        // second item always reallocates. Let `Vec`'s growth policy size it.
+        let mut items = Vec::new();
+        items.push(head);
+        let mut seps = Vec::new();
+        // Same as `Vec<SepItem<S, T>>`: stop at the first `S T` that fails.
+        loop {
+            let Some((sep, after_sep)) = S::parse_at(input, pos, state.reborrow()) else {
+                break;
+            };
+            let Some((item, after_item)) = T::parse_at(input, after_sep, state.reborrow()) else {
+                break;
+            };
+            // A grammar where `S` and `T` can both match empty is not
+            // supported. As a courtesy, stop instead of looping forever when
+            // that happens; the condition is constant false otherwise.
+            if <S::First as First>::CONTAINS_NIL
+                && <T::First as First>::CONTAINS_NIL
+                && after_item == pos
+            {
+                break;
+            }
+            seps.push(sep);
+            items.push(item);
+            pos = after_item;
+        }
+        Some((VecSep { items, seps }, pos))
+    }
+
+    #[inline(always)]
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
+        <VecSepSource<T, S> as Grammar>::scan_at(input, pos, state)
+    }
+
+    fn print_to(&self, buf: &mut String) {
+        <Self as GrammarFrom>::print_to(self, buf);
+    }
+
+    fn to_bnf() -> bnf::Expr {
+        <VecSepSource<T, S> as Grammar>::to_bnf()
+    }
+
+    fn fail_at(pos: usize, state: State) -> bool {
+        <VecSepSource<T, S> as Grammar>::fail_at(pos, state)
+    }
+}
+
+impl<T: Grammar, S: Grammar> GrammarRule for VecSep<T, S> {
+    // Matches what the derive's default naming would give.
+    #[cfg(not(any(feature = "lower_bnf_name", feature = "upper_bnf_name")))]
+    const NAME: &'static str = "VecSep";
+    #[cfg(all(feature = "lower_bnf_name", not(feature = "upper_bnf_name")))]
+    const NAME: &'static str = "vecsep";
+    #[cfg(all(feature = "upper_bnf_name", not(feature = "lower_bnf_name")))]
+    const NAME: &'static str = "VECSEP";
+    #[cfg(all(feature = "lower_bnf_name", feature = "upper_bnf_name"))]
+    const NAME: &'static str = "VecSep";
+
+    fn to_bnf_def() -> bnf::Expr {
+        <VecSepSource<T, S> as Grammar>::to_bnf()
     }
 }
 

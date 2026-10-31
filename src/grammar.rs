@@ -67,6 +67,12 @@ pub trait Grammar: Sized + 'static {
 
     /// Parse the entire `input` as `Self`, failing if any input is left unconsumed.
     fn parse(input: &str) -> Result<Self, Error> {
+        Self::parse_bytes(input.as_bytes())
+    }
+
+    /// Like [`parse`](Self::parse), on bytes: text is checked to be UTF-8
+    /// only where it is read as text.
+    fn parse_bytes(input: &[u8]) -> Result<Self, Error> {
         #[cfg(feature = "trace_pos")]
         let mut history = History::new();
         #[cfg(feature = "trace_one_node")]
@@ -93,6 +99,12 @@ pub trait Grammar: Sized + 'static {
     /// `input` — returns the byte position just past the match, leaving any
     /// remaining input unexamined.
     fn parse_prefix(input: &str) -> Result<(Self, usize), Error> {
+        Self::parse_prefix_bytes(input.as_bytes())
+    }
+
+    /// Like [`parse_prefix`](Self::parse_prefix), on bytes: text is checked to be UTF-8
+    /// only where it is read as text.
+    fn parse_prefix_bytes(input: &[u8]) -> Result<(Self, usize), Error> {
         #[cfg(feature = "trace_pos")]
         let mut history = History::new();
         #[cfg(feature = "trace_one_node")]
@@ -116,6 +128,12 @@ pub trait Grammar: Sized + 'static {
     /// Like [`parse`](Self::parse), but only checks that `input` is well-formed
     /// and discards the parsed value.
     fn scan(input: &str) -> Result<(), Error> {
+        Self::scan_bytes(input.as_bytes())
+    }
+
+    /// Like [`scan`](Self::scan), on bytes: text is checked to be UTF-8
+    /// only where it is read as text.
+    fn scan_bytes(input: &[u8]) -> Result<(), Error> {
         #[cfg(feature = "trace_pos")]
         let mut history = History::new();
         #[cfg(feature = "trace_one_node")]
@@ -142,6 +160,12 @@ pub trait Grammar: Sized + 'static {
     /// `input` — returns the byte position just past the match, leaving any
     /// remaining input unexamined.
     fn scan_prefix(input: &str) -> Result<usize, Error> {
+        Self::scan_prefix_bytes(input.as_bytes())
+    }
+
+    /// Like [`scan_prefix`](Self::scan_prefix), on bytes: text is checked to be UTF-8
+    /// only where it is read as text.
+    fn scan_prefix_bytes(input: &[u8]) -> Result<usize, Error> {
         #[cfg(feature = "trace_pos")]
         let mut history = History::new();
         #[cfg(feature = "trace_one_node")]
@@ -164,11 +188,11 @@ pub trait Grammar: Sized + 'static {
 
     /// Attempt to parse `Self` starting at `pos`, returning the value and the
     /// position just past it, or `None` on failure.
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)>;
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)>;
 
     /// Like [`parse_at`](Self::parse_at), but only checks well-formedness and
     /// returns the end position.
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize>;
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize>;
 
     /// Serialize `self` back to text, appending to `buf`.
     fn print_to(&self, buf: &mut String);
@@ -270,7 +294,9 @@ impl<T> IntoInner<T> for Hidden<T> {
 // ── Raw<T>  →  parse via T, store only the matched string ───────────────────
 
 /// Wrapper that parses using the wrapped grammar but keeps only the raw
-/// matched text as a `String`.
+/// matched bytes. Reading them as text ([`as_str`](Raw::as_str),
+/// [`into_string`](Raw::into_string)) checks that they are UTF-8; parsing
+/// itself never does.
 ///
 /// This is useful for grammar elements where the *structure* matters for
 /// parsing (e.g. `Ws` defined as `StringOf<IsSpace>`), but consumers
@@ -293,17 +319,37 @@ impl<T> IntoInner<T> for Hidden<T> {
 /// #[grammar(name = "expr")]
 /// struct Expr(Term, Vec<(Raw<Ws>, AddOp, Raw<Ws>, Term)>);
 /// ```
-pub struct Raw<T>(pub String, PhantomData<T>);
+pub struct Raw<T>(Vec<u8>, PhantomData<T>);
 
 impl<T> Raw<T> {
     /// Construct a `Raw` from an already-known string.
     pub fn new(s: impl Into<String>) -> Self {
-        Raw(s.into(), PhantomData)
+        Raw(s.into().into_bytes(), PhantomData)
     }
 
-    /// The matched text.
-    pub fn as_str(&self) -> &str {
+    /// Construct a `Raw` from already-known bytes.
+    pub fn from_bytes(b: impl Into<Vec<u8>>) -> Self {
+        Raw(b.into(), PhantomData)
+    }
+
+    /// The matched bytes.
+    pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+
+    /// The matched text, if it is UTF-8.
+    pub fn as_str(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.0)
+    }
+
+    /// The matched bytes, owned.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
+    /// The matched text, owned, if it is UTF-8.
+    pub fn into_string(self) -> Result<String, std::string::FromUtf8Error> {
+        String::from_utf8(self.0)
     }
 }
 
@@ -311,19 +357,18 @@ impl<T: Grammar> Grammar for Raw<T> {
     type First = T::First;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         let new_pos = T::scan_at(input, pos, state)?;
-        Some((Raw(input[pos..new_pos].to_string(), PhantomData), new_pos))
+        Some((Raw(input[pos..new_pos].to_vec(), PhantomData), new_pos))
     }
 
     #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
-        let end = T::scan_at(input, pos, state)?;
-        Some(end)
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
+        T::scan_at(input, pos, state)
     }
 
     fn print_to(&self, buf: &mut String) {
-        buf.push_str(&self.0);
+        buf.push_str(&String::from_utf8_lossy(&self.0));
     }
 
     fn to_bnf() -> Expr {
@@ -335,11 +380,13 @@ impl<T: Grammar> Grammar for Raw<T> {
     }
 }
 
-// Manual trait impls — only the String matters, no bounds on T.
+// Manual trait impls — only the bytes matter, no bounds on T.
 
 impl<T> fmt::Debug for Raw<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Raw").field(&self.0).finish()
+        f.debug_tuple("Raw")
+            .field(&String::from_utf8_lossy(&self.0))
+            .finish()
     }
 }
 
@@ -364,33 +411,46 @@ impl<T> std::hash::Hash for Raw<T> {
 }
 
 impl<T> std::ops::Deref for Raw<T> {
-    type Target = str;
-    fn deref(&self) -> &str {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
         &self.0
     }
 }
 
-impl<T> AsRef<str> for Raw<T> {
-    fn as_ref(&self) -> &str {
+impl<T> AsRef<[u8]> for Raw<T> {
+    fn as_ref(&self) -> &[u8] {
         &self.0
     }
 }
 
+/// The text, with invalid UTF-8 shown as U+FFFD.
 impl<T> fmt::Display for Raw<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&String::from_utf8_lossy(&self.0))
     }
 }
 
 impl<T> From<&str> for Raw<T> {
     fn from(s: &str) -> Self {
-        Raw(s.to_string(), PhantomData)
+        Raw(s.as_bytes().to_vec(), PhantomData)
     }
 }
 
 impl<T> From<String> for Raw<T> {
     fn from(s: String) -> Self {
-        Raw(s, PhantomData)
+        Raw(s.into_bytes(), PhantomData)
+    }
+}
+
+impl<T> From<&[u8]> for Raw<T> {
+    fn from(b: &[u8]) -> Self {
+        Raw(b.to_vec(), PhantomData)
+    }
+}
+
+impl<T> From<Vec<u8>> for Raw<T> {
+    fn from(b: Vec<u8>) -> Self {
+        Raw(b, PhantomData)
     }
 }
 
@@ -398,7 +458,7 @@ impl<T: Grammar> Grammar for Option<T> {
     type First = <T::First as First>::Nullable;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         match T::parse_at(input, pos, state) {
             Some((val, new_pos)) => Some((Some(val), new_pos)),
             None => Some((None, pos)),
@@ -406,7 +466,7 @@ impl<T: Grammar> Grammar for Option<T> {
     }
 
     #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
         match T::scan_at(input, pos, state) {
             Some(end_pos) => Some(end_pos),
             None => Some(pos),
@@ -433,7 +493,7 @@ impl<T: Grammar> Grammar for Vec<T> {
     type First = <T::First as First>::Nullable;
 
     #[inline]
-    fn parse_at(input: &str, mut pos: usize, mut state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], mut pos: usize, mut state: State) -> Option<(Self, usize)> {
         let mut items: Vec<T> = Vec::new();
         while let Some((val, new_pos)) = { T::parse_at(input, pos, state.reborrow()) } {
             if new_pos == pos {
@@ -446,7 +506,7 @@ impl<T: Grammar> Grammar for Vec<T> {
     }
 
     #[inline]
-    fn scan_at(input: &str, mut pos: usize, mut state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], mut pos: usize, mut state: State) -> Option<usize> {
         while let Some(new_pos) = { T::scan_at(input, pos, state.reborrow()) } {
             if new_pos == pos {
                 break;
@@ -475,12 +535,12 @@ impl<T: Grammar> Grammar for Vec<T> {
 impl<T: Grammar> Grammar for Box<T> {
     type First = T::First;
 
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         let (val, new_pos) = T::parse_at(input, pos, state)?;
         Some((Box::new(val), new_pos))
     }
 
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
         T::scan_at(input, pos, state)
     }
 
@@ -501,12 +561,12 @@ impl Grammar for () {
     type First = EmptyFirst;
 
     #[inline]
-    fn parse_at(_input: &str, pos: usize, _state: State) -> Option<(Self, usize)> {
+    fn parse_at(_input: &[u8], pos: usize, _state: State) -> Option<(Self, usize)> {
         Some(((), pos))
     }
 
     #[inline]
-    fn scan_at(_input: &str, pos: usize, _state: State) -> Option<usize> {
+    fn scan_at(_input: &[u8], pos: usize, _state: State) -> Option<usize> {
         Some(pos)
     }
 
@@ -535,7 +595,7 @@ macro_rules! impl_grammar_tuple {
 
             #[inline]
             fn parse_at(
-                input: &str,
+                input: &[u8],
                 pos: usize,
                 #[allow(unused_mut)] mut state: State,
             ) -> Option<(Self, usize)> {
@@ -551,7 +611,7 @@ macro_rules! impl_grammar_tuple {
 
             #[inline]
             fn scan_at(
-                input: &str,
+                input: &[u8],
                 pos: usize,
                 #[allow(unused_mut)] mut state: State,
             ) -> Option<usize> {
@@ -599,14 +659,14 @@ impl<A: Grammar, B: Grammar> Grammar for either::Either<A, B> {
     type First = <A::First as First>::Union<B::First>;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, mut state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, mut state: State) -> Option<(Self, usize)> {
         A::parse_at(input, pos, state.reborrow())
             .map(|(x, end_pos)| (Left(x), end_pos))
             .or_else(|| B::parse_at(input, pos, state).map(|(x, end_pos)| (Right(x), end_pos)))
     }
 
     #[inline]
-    fn scan_at(input: &str, pos: usize, mut state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, mut state: State) -> Option<usize> {
         A::scan_at(input, pos, state.reborrow()).or_else(|| B::scan_at(input, pos, state))
     }
 
@@ -646,13 +706,13 @@ impl<G: Grammar> Grammar for NotFollowedBy<G> {
     type First = EmptyFirst;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         let pos = Self::scan_at(input, pos, state)?;
         Some((NotFollowedBy(PhantomData), pos))
     }
 
     #[inline]
-    fn scan_at(input: &str, pos: usize, mut state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, mut state: State) -> Option<usize> {
         // Silent lookahead: probe G on a throwaway history so a match (or miss)
         // doesn't pollute the real error trace.
         match state.probe(|state| G::scan_at(input, pos, state)) {
@@ -801,7 +861,7 @@ impl<T: Grammar> Grammar for Range<T> {
     type First = T::First;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         if let Some((it, new_pos)) = T::parse_at(input, pos, state) {
             Some((
                 Range {
@@ -817,7 +877,7 @@ impl<T: Grammar> Grammar for Range<T> {
     }
 
     #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
         T::scan_at(input, pos, state)
     }
 
@@ -850,7 +910,7 @@ impl<T: Grammar> Grammar for Vec1<T> {
     type First = T::First;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         let (x, pos) = <Vec<T>>::parse_at(input, pos, state).unwrap();
         if x.is_empty() {
             None
@@ -860,7 +920,7 @@ impl<T: Grammar> Grammar for Vec1<T> {
     }
 
     #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
         let end = <Vec<T>>::scan_at(input, pos, state).unwrap();
         if end == pos { None } else { Some(end) }
     }
@@ -886,13 +946,13 @@ impl<T: Grammar> Grammar for PhantomData<T> {
     type First = T::First;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         let pos = Self::scan_at(input, pos, state)?;
         Some((PhantomData, pos))
     }
 
     #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
         T::scan_at(input, pos, state)
     }
 
