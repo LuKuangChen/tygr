@@ -339,7 +339,7 @@ impl<T> Raw<T> {
 
     /// The matched text, if it is UTF-8.
     pub fn as_str(&self) -> Result<&str, std::str::Utf8Error> {
-        utf8_text(&self.0)
+        std::str::from_utf8(&self.0)
     }
 
     /// The matched bytes, owned.
@@ -349,32 +349,7 @@ impl<T> Raw<T> {
 
     /// The matched text, owned, if it is UTF-8.
     pub fn into_string(self) -> Result<String, std::string::FromUtf8Error> {
-        utf8_string(self.0)
-    }
-}
-
-/// `bytes` as text, if it is UTF-8. All-ASCII spans (numbers, identifiers,
-/// keywords) skip the general validator's fixed cost.
-#[doc(hidden)]
-#[inline(always)]
-pub fn utf8_text(bytes: &[u8]) -> Result<&str, std::str::Utf8Error> {
-    if bytes.is_ascii() {
-        // SAFETY: every byte is ASCII, and ASCII bytes are valid UTF-8.
-        Ok(unsafe { std::str::from_utf8_unchecked(bytes) })
-    } else {
-        std::str::from_utf8(bytes)
-    }
-}
-
-/// `bytes` as a `String`, if it is UTF-8; see [`utf8_text`].
-#[doc(hidden)]
-#[inline(always)]
-pub fn utf8_string(bytes: Vec<u8>) -> Result<String, std::string::FromUtf8Error> {
-    if bytes.is_ascii() {
-        // SAFETY: every byte is ASCII, and ASCII bytes are valid UTF-8.
-        Ok(unsafe { String::from_utf8_unchecked(bytes) })
-    } else {
-        String::from_utf8(bytes)
+        String::from_utf8(self.0)
     }
 }
 

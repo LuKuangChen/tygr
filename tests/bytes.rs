@@ -41,5 +41,8 @@ fn conversions_from_text_reject_invalid_utf8() {
 #[test]
 fn predicate_classes_do_not_match_invalid_utf8() {
     assert_eq!(StringOf::<NotQuote>::scan_prefix_bytes(b"ab\xFFcd"), Ok(2));
-    assert_eq!(StringOf::<NotQuote>::scan_prefix_bytes("abé".as_bytes()), Ok(4));
+    assert_eq!(
+        StringOf::<NotQuote>::scan_prefix_bytes("abé".as_bytes()),
+        Ok(4)
+    );
 }

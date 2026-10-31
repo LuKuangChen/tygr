@@ -506,7 +506,7 @@ fn impl_convert(input: &DeriveInput, convert: Convert) -> syn::Result<TokenStrea
         Convert::FromStr => quote! {
             let end = <#source as ::tygr::Grammar>::scan_at(input, pos, state.reborrow())?;
             // Reading the match as text is where it must be UTF-8.
-            match ::tygr::utf8_text(&input[pos..end]) {
+            match ::core::str::from_utf8(&input[pos..end]) {
                 Ok(text) => match <#self_ty as ::core::str::FromStr>::from_str(text) {
                     Ok(value) => {
                         #validate
