@@ -241,8 +241,8 @@ fn context_records_full_node_chain() {
     );
 }
 
-// 4+ variants trips the derive's FIRST-set dispatch table (see DISPATCH_THRESHOLD
-// in tygr-derive), which is what the test below exercises.
+// 4+ variants makes the derive compile the enum as one arm per first byte (see
+// ARMS_THRESHOLD in tygr-derive), which is what the test below exercises.
 #[derive(Grammar, Debug, PartialEq, Eq)]
 enum Op {
     Add(StringEq!("+")),
@@ -282,9 +282,10 @@ fn enum_records_every_variant_when_first_matches_none() {
 
 // A nullable variant (`Option<..>` always matches empty) inside a 4+-variant
 // enum, embedded as a non-last struct field, embedded as a non-last variant of
-// another 4+-variant enum — exercises fail_at's OR-chain (nullable variant
-// doesn't block the struct's next field) and AND-fold (a required sibling
-// variant doesn't block the enum's other siblings) together.
+// another 4+-variant enum — checks that the arms still record what every
+// alternative expected: a nullable variant doesn't hide the struct's next
+// field, and a required sibling variant doesn't hide the enum's other
+// siblings.
 #[derive(Grammar, Debug, PartialEq, Eq)]
 enum NullableOp {
     Add(StringEq!("+")),

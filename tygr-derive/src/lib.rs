@@ -391,18 +391,6 @@ fn to_bnf(fields: &ProcessedFields) -> TokenStream2 {
     }
 }
 
-/// `A::fail_at(..) || B::fail_at(..) || .. || false`: each field reports itself
-/// unconditionally; a required (non-nullable) field short-circuits the rest,
-/// since real parsing would never reach them either.
-fn fail_at(fields: &ProcessedFields) -> TokenStream2 {
-    let calls = fields.iter().map(|(_, _, t)| {
-        quote! { <#t as ::tygr::Grammar>::fail_at(pos, state.reborrow()) }
-    });
-    quote! {
-        #(#calls ||)* false
-    }
-}
-
 fn bnf_ref(grammar_name: &str, hidden: bool, to_bnf: &TokenStream2, inline: bool) -> TokenStream2 {
     if hidden {
         quote! { ::tygr::bnf::Expr::empty() }
@@ -419,8 +407,6 @@ struct FieldsInfo {
     scan_at: TokenStream2,
     print_to: TokenStream2,
     to_bnf: TokenStream2,
-    fail_at: TokenStream2,
-    first: TokenStream2,
 }
 
 impl FieldsInfo {
@@ -429,20 +415,12 @@ impl FieldsInfo {
         let print_steps = print_steps(&fields);
         let parse_at = parse_at(validated, &fields, &constructor);
         let scan_at = scan_at(validated, &fields, &constructor);
-        let mut first = quote! { ::tygr::first::OptionalFirst<::tygr::first::Never> };
-        for (_, _, t) in &fields {
-            first = quote! {
-                <#first as ::tygr::first::First>::Concat<#t>
-            }
-        }
         Self {
             parse_at: quote! { #parse_at },
             scan_at: quote! { #scan_at },
             print_to: quote! {#(#print_steps)*},
             to_bnf: to_bnf(&fields),
-            fail_at: fail_at(&fields),
             constructor,
-            first,
         }
     }
 }
@@ -583,8 +561,6 @@ fn impl_convert(input: &DeriveInput, convert: Convert) -> syn::Result<TokenStrea
     };
     Ok(quote! {
         impl #impl_generics ::tygr::Grammar for #self_ty #where_clause {
-            type First = <#source as ::tygr::Grammar>::First;
-
             #[inline(always)]
             fn parse_at(input: &[u8], pos: usize, __head: u32, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
                 #parse_at
@@ -601,10 +577,6 @@ fn impl_convert(input: &DeriveInput, convert: Convert) -> syn::Result<TokenStrea
 
             fn to_bnf() -> ::tygr::bnf::Expr {
                 #bnf_ref
-            }
-
-            fn fail_at(pos: usize, state: ::tygr::State) -> bool {
-                <#source as ::tygr::Grammar>::fail_at(pos, state)
             }
         }
 
@@ -635,12 +607,9 @@ fn impl_struct(
         scan_at,
         print_to,
         to_bnf,
-        fail_at,
-        first,
     } = FieldsInfo::from(validated, tag, fields);
     let parse_at = with_node(inline, parse_at);
     let scan_at = with_node(inline, scan_at);
-    let fail_at = with_node(inline, fail_at);
     let to_bnf = if validated {
         quote! { ::tygr::bnf::Expr::side_condition(#to_bnf, <Self as ::tygr::Validate>::REQUIREMENT) }
     } else {
@@ -650,8 +619,6 @@ fn impl_struct(
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     Ok(quote! {
         impl #impl_generics ::tygr::Grammar for #ident #ty_generics #where_clause {
-            type First = #first;
-
             #[inline(always)]
             fn parse_at(input: &[u8], pos: usize, __head: u32, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
                 #parse_at
@@ -669,10 +636,6 @@ fn impl_struct(
 
             fn to_bnf() -> ::tygr::bnf::Expr {
                 #bnf_ref
-            }
-
-            fn fail_at(#[allow(unused_variables)] pos: usize, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> bool {
-                #fail_at
             }
         }
 
@@ -702,8 +665,6 @@ fn impl_enum(
     let mut each_scan_at = vec![];
     let mut each_print_to = vec![];
     let mut each_to_bnf = vec![];
-    let mut each_fail_at = vec![];
-    let mut each_first = vec![];
     for variant in &data.variants {
         let variant_ident = &variant.ident;
         let tag = Tag::new(quote! { #ident }, Some(quote! {#variant_ident}));
@@ -713,25 +674,13 @@ fn impl_enum(
             scan_at,
             print_to,
             to_bnf,
-            fail_at,
-            first,
         } = FieldsInfo::from(validated, tag, &variant.fields);
         each_constructor.push(constructor);
         each_parse_at.push(parse_at);
         each_scan_at.push(scan_at);
         each_print_to.push(print_to);
         each_to_bnf.push(to_bnf);
-        each_fail_at.push(fail_at);
-        each_first.push(first);
     }
-    // Alternatives aren't sequential: every variant reports itself unconditionally
-    // (no short-circuiting between them). The enum as a whole is required only if
-    // every variant is (`&`, not `&&`, so all still get called for their side effects).
-    let fail_at_variants_body = {
-        let mut variants = each_fail_at.iter();
-        let first = variants.next().cloned().unwrap_or_else(|| quote! { false });
-        variants.fold(first, |acc, next| quote! { (#acc) & (#next) })
-    };
     let to_bnf = quote! { ::tygr::bnf::Expr::alternation(vec![ #(#each_to_bnf),* ]) };
     let to_bnf = if validated {
         quote! { ::tygr::bnf::Expr::side_condition(#to_bnf, <Self as ::tygr::Validate>::REQUIREMENT) }
@@ -740,7 +689,7 @@ fn impl_enum(
     };
     let bnf_ref = bnf_ref(&name, hidden, &to_bnf, inline);
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let n = each_first.len();
+    let n = data.variants.len();
     let self_ty = quote! { #ident #ty_generics };
     // Each alternative as its own always-inlined method (not a closure, which
     // the compiler may leave out of line), so a constant first byte reaches
@@ -778,7 +727,9 @@ fn impl_enum(
     // byte (0-255, and 256 for the end of the input) and jump to the copy for
     // the actual byte. With the byte a constant in each copy, the compiler
     // drops the variants that cannot start with it and the first-byte checks
-    // of those that can; copies that come out identical are merged.
+    // of those that can (a dropped variant leaves only its failure branch:
+    // with tracing, recording what it expected); copies that come out
+    // identical are merged.
     const ARMS_THRESHOLD: usize = 4;
     let (dispatch_body, scan_dispatch_body, case_impls) = if n >= ARMS_THRESHOLD {
         let parse_arms = (0..=256u32).map(|x| quote! { Self::parse_arm::<#x> });
@@ -787,24 +738,16 @@ fn impl_enum(
             quote! { Self::PARSE_ARMS[__head as usize](input, pos, state) },
             quote! { Self::SCAN_ARMS[__head as usize](input, pos, state) },
             quote! {
-                #[inline(always)]
-                fn parse_choice(input: &[u8], pos: usize, __head: u32, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
+                #[inline(never)]
+                fn parse_arm<const X: u32>(input: &[u8], pos: usize, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
+                    let __head = X;
                     #parse_choice
                 }
 
-                #[inline(always)]
-                fn scan_choice(input: &[u8], pos: usize, __head: u32, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<usize> {
+                #[inline(never)]
+                fn scan_arm<const X: u32>(input: &[u8], pos: usize, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<usize> {
+                    let __head = X;
                     #scan_choice
-                }
-
-                #[inline(never)]
-                fn parse_arm<const X: u32>(input: &[u8], pos: usize, state: ::tygr::State) -> Option<(Self, usize)> {
-                    Self::parse_choice(input, pos, X, state)
-                }
-
-                #[inline(never)]
-                fn scan_arm<const X: u32>(input: &[u8], pos: usize, state: ::tygr::State) -> Option<usize> {
-                    Self::scan_choice(input, pos, X, state)
                 }
 
                 const PARSE_ARMS: [fn(&[u8], usize, ::tygr::State<'_>) -> Option<(#self_ty, usize)>; 257] = [ #(#parse_arms),* ];
@@ -817,32 +760,12 @@ fn impl_enum(
     let case_impls = quote! { #variant_fns #case_impls };
     let parse_body = with_node(inline, dispatch_body);
     let scan_body = with_node(inline, scan_dispatch_body);
-    let fail_at = with_node(inline, quote! { Self::fail_at_variants(pos, state) });
-    let first = {
-        let mut the_first = quote! { ::tygr::first::Never };
-        for first in each_first {
-            the_first = quote! { <#the_first as ::tygr::first::First>::Union<#first> };
-        }
-        the_first
-    };
     Ok(quote! {
         impl #impl_generics #ident #ty_generics #where_clause {
             #case_impls
-
-            #[inline]
-            fn parse_case_none(_input: &[u8], _pos: usize, _state: ::tygr::State) -> Option<(Self, usize)> {
-                None
-            }
-
-            #[inline]
-            fn fail_at_variants(#[allow(unused_variables)] pos: usize, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> bool {
-                #fail_at_variants_body
-            }
         }
 
         impl #impl_generics ::tygr::Grammar for #ident #ty_generics #where_clause {
-            type First = #first;
-
             #[inline(always)]
             fn parse_at(input: &[u8], pos: usize, __head: u32, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
                 #parse_body
@@ -861,10 +784,6 @@ fn impl_enum(
 
             fn to_bnf() -> ::tygr::bnf::Expr {
                 #bnf_ref
-            }
-
-            fn fail_at(pos: usize, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> bool {
-                #fail_at
             }
         }
 

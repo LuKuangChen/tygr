@@ -10,7 +10,6 @@
 //! See the crate-level `## Design` section for how Rust constructs map to
 //! EBNF concepts.
 
-use crate::first::{EmptyFirst, First};
 #[cfg(feature = "trace_one_node")]
 use crate::state::Context;
 #[cfg(feature = "trace_pos")]
@@ -28,43 +27,6 @@ use tygr_derive::Grammar;
 /// Implement this by hand only for leaf/wrapper types; for `struct`s and
 /// `enum`s, `#[derive(Grammar)]` generates it (see the crate-level docs).
 pub trait Grammar: Sized + 'static {
-    /// The set of bytes (and whether empty input is valid) this grammar
-    /// could start with — used to fast-path-reject an alternative before
-    /// actually trying to parse it. A manual `impl Grammar` picks its
-    /// `First` one of three ways, in order of preference:
-    ///
-    /// 1. **Delegate** to a grammar this one wraps or forwards to:
-    ///    `type First = T::First;` (e.g. [`Raw<T>`](Raw), `Box<T>`).
-    /// 2. **Build from a known, finite set of characters**: start from
-    ///    [`first::Never`](crate::first::Never) (matches no byte, not
-    ///    nullable) and chain
-    ///    [`WithChar<C>`](crate::first::First::WithChar) /
-    ///    [`WithCharCI<C>`](crate::first::First::WithCharCI) for each
-    ///    character; finish with
-    ///    [`Nullable`](crate::first::First::Nullable) if the grammar can
-    ///    also match empty input.
-    /// 3. **Over-approximate with [`first::AnyChar`](crate::first::AnyChar)**
-    ///    (matches any byte) when the starting characters can't be
-    ///    enumerated at compile time — e.g. behind an arbitrary runtime
-    ///    predicate. `AnyChar` by itself is *not* nullable; add
-    ///    [`Nullable`](crate::first::First::Nullable) if the grammar can
-    ///    also match empty input.
-    ///
-    /// ```
-    /// # use tygr::*;
-    /// # use tygr::first::*;
-    /// // Case 2: matches 'a' or 'b', not nullable.
-    /// type AOrB = <<Never as First>::WithChar<'a'> as First>::WithChar<'b'>;
-    ///
-    /// // Case 3, nullable: matches any single character, or none.
-    /// type MaybeAnyChar = <AnyChar as First>::Nullable;
-    ///
-    /// fn assert_first<T: First>() {}
-    /// assert_first::<AOrB>();
-    /// assert_first::<MaybeAnyChar>();
-    /// ```
-    type First: First;
-
     /// Parse the entire `input` as `Self`, failing if any input is left unconsumed.
     fn parse(input: &str) -> Result<Self, Error> {
         Self::parse_bytes(input.as_bytes())
@@ -203,18 +165,6 @@ pub trait Grammar: Sized + 'static {
     /// Describe this grammar as a BNF/EBNF expression, for use in a
     /// referencing rule's own definition.
     fn to_bnf() -> Expr;
-
-    /// Record what this grammar would have expected at `pos`, without
-    /// attempting to actually parse — used when a caller already knows (e.g.
-    /// via `First`) that this alternative cannot match here, but still wants
-    /// it traced.
-    ///
-    /// Returns whether this grammar is *required* at `pos` (`Self::First`
-    /// doesn't contain nil). Sequential composition (`A::fail_at(..) ||
-    /// B::fail_at(..)`) can stop once a required element reports itself,
-    /// since real parsing would never reach anything after it either;
-    /// nullable elements return `false` so the chain keeps going.
-    fn fail_at(pos: usize, state: State) -> bool;
 
     /// Serialize `self` to a new `String`; see [`print_to`](Self::print_to).
     fn print(&self) -> String {
@@ -368,8 +318,6 @@ pub fn head_at(input: &[u8], pos: usize) -> u32 {
 }
 
 impl<T: Grammar> Grammar for Raw<T> {
-    type First = T::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         let new_pos = T::scan_at(input, pos, head, state)?;
@@ -387,10 +335,6 @@ impl<T: Grammar> Grammar for Raw<T> {
 
     fn to_bnf() -> Expr {
         T::to_bnf()
-    }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state)
     }
 }
 
@@ -469,8 +413,6 @@ impl<T> From<Vec<u8>> for Raw<T> {
 }
 
 impl<T: Grammar> Grammar for Option<T> {
-    type First = <T::First as First>::Nullable;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         match T::parse_at(input, pos, head, state) {
@@ -496,16 +438,9 @@ impl<T: Grammar> Grammar for Option<T> {
     fn to_bnf() -> Expr {
         Expr::optional(T::to_bnf())
     }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state);
-        false
-    }
 }
 
 impl<T: Grammar> Grammar for Vec<T> {
-    type First = <T::First as First>::Nullable;
-
     #[inline(always)]
     fn parse_at(
         input: &[u8],
@@ -546,16 +481,9 @@ impl<T: Grammar> Grammar for Vec<T> {
     fn to_bnf() -> Expr {
         Expr::repetition(T::to_bnf())
     }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state);
-        false
-    }
 }
 
 impl<T: Grammar> Grammar for Box<T> {
-    type First = T::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         let (val, new_pos) = T::parse_at(input, pos, head, state)?;
@@ -574,15 +502,9 @@ impl<T: Grammar> Grammar for Box<T> {
     fn to_bnf() -> Expr {
         T::to_bnf()
     }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state)
-    }
 }
 
 impl Grammar for () {
-    type First = EmptyFirst;
-
     #[inline(always)]
     fn parse_at(_input: &[u8], pos: usize, _head: u32, _state: State) -> Option<(Self, usize)> {
         Some(((), pos))
@@ -598,24 +520,11 @@ impl Grammar for () {
     fn to_bnf() -> Expr {
         Expr::empty()
     }
-
-    fn fail_at(_pos: usize, _state: State) -> bool {
-        false
-    }
-}
-
-macro_rules! concat_first {
-    ($acc:ty;) => { $acc };
-    ($acc:ty; $T:ident $(, $rest:ident)*) => {
-        concat_first!(<$acc as First>::Concat<$T>; $($rest),*)
-    };
 }
 
 macro_rules! impl_grammar_tuple {
     ($($idx:tt $T:ident),+) => {
         impl<$($T: Grammar),+> Grammar for ($($T,)+) {
-            type First = concat_first!(EmptyFirst; $($T),+);
-
             #[inline(always)]
             fn parse_at(
                 input: &[u8],
@@ -662,9 +571,6 @@ macro_rules! impl_grammar_tuple {
                 Expr::sequence(vec![$(<$T>::to_bnf()),+])
             }
 
-            fn fail_at(pos: usize, #[allow(unused_mut)] mut state: State) -> bool {
-                $( <$T>::fail_at(pos, state.reborrow()) || )+ false
-            }
         }
     };
 }
@@ -683,8 +589,6 @@ impl_grammar_tuple!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H, 8 I, 9 J, 10 K);
 use either::Either::*;
 
 impl<A: Grammar, B: Grammar> Grammar for either::Either<A, B> {
-    type First = <A::First as First>::Union<B::First>;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, mut state: State) -> Option<(Self, usize)> {
         A::parse_at(input, pos, head, state.reborrow())
@@ -710,12 +614,6 @@ impl<A: Grammar, B: Grammar> Grammar for either::Either<A, B> {
     fn to_bnf() -> Expr {
         Expr::alternation(vec![A::to_bnf(), B::to_bnf()])
     }
-
-    fn fail_at(pos: usize, mut state: State) -> bool {
-        let a = A::fail_at(pos, state.reborrow());
-        let b = B::fail_at(pos, state);
-        a && b
-    }
 }
 
 /// Zero-width negative lookahead: matches the empty string, but only when the
@@ -733,8 +631,6 @@ impl<A: Grammar, B: Grammar> Grammar for either::Either<A, B> {
 pub struct NotFollowedBy<G>(PhantomData<G>);
 
 impl<G: Grammar> Grammar for NotFollowedBy<G> {
-    type First = EmptyFirst;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         let pos = Self::scan_at(input, pos, head, state)?;
@@ -755,10 +651,6 @@ impl<G: Grammar> Grammar for NotFollowedBy<G> {
 
     fn to_bnf() -> Expr {
         Expr::NotFollowedBy(Box::new(G::to_bnf()))
-    }
-
-    fn fail_at(_pos: usize, _state: State) -> bool {
-        false
     }
 }
 
@@ -888,8 +780,6 @@ impl<T, E> Range<Result<T, E>> {
 }
 
 impl<T: Grammar> Grammar for Range<T> {
-    type First = T::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         if let Some((it, new_pos)) = T::parse_at(input, pos, head, state) {
@@ -918,10 +808,6 @@ impl<T: Grammar> Grammar for Range<T> {
     fn to_bnf() -> Expr {
         T::to_bnf()
     }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state)
-    }
 }
 
 /// Like `Vec`, but matches *one or more* items rather than zero or more.
@@ -937,8 +823,6 @@ impl<T> Deref for Vec1<T> {
 }
 
 impl<T: Grammar> Grammar for Vec1<T> {
-    type First = T::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         let (x, pos) = <Vec<T>>::parse_at(input, pos, head, state).unwrap();
@@ -964,17 +848,11 @@ impl<T: Grammar> Grammar for Vec1<T> {
     fn to_bnf() -> Expr {
         Expr::sequence(vec![T::to_bnf(), <Vec<T>>::to_bnf()])
     }
-
-    fn fail_at(pos: usize, mut state: State) -> bool {
-        T::fail_at(pos, state.reborrow()) || <Vec<T>>::fail_at(pos, state)
-    }
 }
 
 /// Consumes and discards input matching `T`, storing nothing. Prints nothing
 /// back, since there's no value left to print.
 impl<T: Grammar> Grammar for PhantomData<T> {
-    type First = T::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         let pos = Self::scan_at(input, pos, head, state)?;
@@ -991,17 +869,13 @@ impl<T: Grammar> Grammar for PhantomData<T> {
     fn to_bnf() -> Expr {
         T::to_bnf()
     }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state)
-    }
 }
 
 /// Bridges a mapped type to its source grammar.
 ///
 /// Every conversion derive (`GrammarFromStr`, `GrammarFromOther`,
 /// `GrammarTryFromOther`) requires this: [`Source`](GrammarFrom::Source) is the
-/// grammar to parse (BNF and `FIRST` fold into it), and
+/// grammar to parse (BNF folds into it), and
 /// [`print_to`](GrammarFrom::print_to) serializes back, since the generated
 /// `Grammar` impl builds `Self` from the source but can't print it.
 /// Implementations typically reconstruct the source grammar and delegate, or

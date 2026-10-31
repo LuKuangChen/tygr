@@ -115,12 +115,10 @@
 
 pub mod bnf;
 mod char;
-pub mod first;
 mod grammar;
 mod olc;
 mod state;
 
-use first::First;
 use std::ops::Deref;
 
 pub use char::*;
@@ -244,7 +242,7 @@ macro_rules! char_class {
 /// Like [`char_class!`], but the predicate must be usable in a `const fn`
 /// (comparisons, `matches!`, `is_ascii_*`, ...), which the compiler enforces.
 /// In return tygr works out at compile time which bytes can start a matching
-/// char, for exact FIRST sets and faster runs in [`StringOf`]/[`StringOf1`].
+/// char, for faster runs in [`StringOf`]/[`StringOf1`].
 ///
 /// A class can also be a union of classes, or one class built from
 /// [`AllChars`], [`NoChars`], [`CharRange`], `StringEq!` (read as the set of
@@ -352,8 +350,8 @@ pub trait Validate {
     fn validate(&self) -> bool;
 }
 
-// `pub`, not private: leaks into `VecSepSource`'s public `Grammar::First`
-// associated type through the `rest` field, so it must stay nameable (E0446).
+// `pub`, not private: `VecSepSource` (public) has it as a field type, so it
+// must stay nameable (E0446).
 #[derive(Debug, Clone, PartialEq, Eq, Grammar)]
 #[grammar(inline)]
 #[doc(hidden)]
@@ -415,8 +413,6 @@ impl<T: Grammar, S: Grammar> GrammarFrom for VecSep<T, S> {
 // two fresh vectors. Everything else delegates to `VecSepSource`, exactly as
 // the derive (with `#[grammar(inline)]`) would.
 impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
-    type First = <VecSepSource<T, S> as Grammar>::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, mut state: State) -> Option<(Self, usize)> {
         let (first_item, mut pos) = T::parse_at(input, pos, head, state.reborrow())?;
@@ -442,11 +438,8 @@ impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
             };
             // A grammar where `S` and `T` can both match empty is not
             // supported. As a courtesy, stop instead of looping forever when
-            // that happens; the condition is constant false otherwise.
-            if <S::First as First>::CONTAINS_NIL
-                && <T::First as First>::CONTAINS_NIL
-                && after_item == pos
-            {
+            // that happens.
+            if after_item == pos {
                 break;
             }
             seps.push(sep);
@@ -467,10 +460,6 @@ impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
 
     fn to_bnf() -> bnf::Expr {
         <VecSepSource<T, S> as Grammar>::to_bnf()
-    }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        <VecSepSource<T, S> as Grammar>::fail_at(pos, state)
     }
 }
 

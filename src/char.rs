@@ -11,7 +11,6 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::bnf::Expr;
-use crate::first::{CharFirst, CharFirstCI, ClassFirst, EmptyFirst, First};
 use crate::grammar::Grammar;
 #[cfg(feature = "trace_expect")]
 use crate::state::PendingExpectation;
@@ -490,8 +489,6 @@ impl<M: CharClass> CharOf<M> {
 }
 
 impl<M: CharClass> Grammar for CharOf<M> {
-    type First = ClassFirst<M>;
-
     #[inline(always)]
     fn parse_at(
         input: &[u8],
@@ -529,19 +526,20 @@ impl<M: CharClass> Grammar for CharOf<M> {
     fn to_bnf() -> Expr {
         Expr::CharOf(M::name().to_string())
     }
+}
 
-    fn fail_at(
-        #[allow(unused_variables)] pos: usize,
-        #[allow(unused_variables, unused_mut)] mut state: State,
-    ) -> bool {
-        #[cfg(feature = "trace_pos")]
-        state.expect(
-            pos,
-            #[cfg(feature = "trace_expect")]
-            PendingExpectation::CharClass(M::name()),
-        );
-        true
-    }
+/// Record that a char of class `C` was expected at `pos`.
+#[inline(always)]
+fn expect_char<C: CharClass>(
+    #[allow(unused_variables)] pos: usize,
+    #[allow(unused_variables, unused_mut)] mut state: State,
+) {
+    #[cfg(feature = "trace_pos")]
+    state.expect(
+        pos,
+        #[cfg(feature = "trace_expect")]
+        PendingExpectation::CharClass(C::name()),
+    );
 }
 
 /// The char starting at byte `pos`, whose first byte is `b`, or `None` if
@@ -623,8 +621,6 @@ fn scan_run<C: CharClass>(input: &[u8], mut pos: usize) -> usize {
 pub struct StringOf<C: CharClass>(Raw<Vec<CharOf<C>>>);
 
 impl<C: CharClass> Grammar for StringOf<C> {
-    type First = <Raw<Vec<CharOf<C>>> as Grammar>::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         let end = Self::scan_at(input, pos, head, state)?;
@@ -640,7 +636,7 @@ impl<C: CharClass> Grammar for StringOf<C> {
     ) -> Option<usize> {
         let end = scan_run::<C>(input, pos);
         #[cfg(feature = "trace_pos")]
-        CharOf::<C>::fail_at(end, state);
+        expect_char::<C>(end, state);
         Some(end)
     }
 
@@ -650,10 +646,6 @@ impl<C: CharClass> Grammar for StringOf<C> {
 
     fn to_bnf() -> Expr {
         Raw::<Vec<CharOf<C>>>::to_bnf()
-    }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        Raw::<Vec<CharOf<C>>>::fail_at(pos, state)
     }
 }
 
@@ -668,8 +660,6 @@ impl<C: CharClass> Grammar for StringOf<C> {
 pub struct StringOf1<C: CharClass>(Raw<(CharOf<C>, Vec<CharOf<C>>)>);
 
 impl<C: CharClass> Grammar for StringOf1<C> {
-    type First = <Raw<(CharOf<C>, Vec<CharOf<C>>)> as Grammar>::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         let end = Self::scan_at(input, pos, head, state)?;
@@ -685,11 +675,11 @@ impl<C: CharClass> Grammar for StringOf1<C> {
     ) -> Option<usize> {
         let end = scan_run::<C>(input, pos);
         if end == pos {
-            CharOf::<C>::fail_at(pos, state);
+            expect_char::<C>(pos, state);
             return None;
         }
         #[cfg(feature = "trace_pos")]
-        CharOf::<C>::fail_at(end, state);
+        expect_char::<C>(end, state);
         Some(end)
     }
 
@@ -699,10 +689,6 @@ impl<C: CharClass> Grammar for StringOf1<C> {
 
     fn to_bnf() -> Expr {
         Raw::<(CharOf<C>, Vec<CharOf<C>>)>::to_bnf()
-    }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        Raw::<(CharOf<C>, Vec<CharOf<C>>)>::fail_at(pos, state)
     }
 }
 
@@ -775,12 +761,8 @@ impl_string_wrapper!(StringOf1);
 
 /// Describes a literal-token chain: enough to match (`scan_at`) and describe
 /// (`add_expectation`) itself; no `Self` value is ever built.
-// `pub`, not private: `StringEq<T>`'s `Grammar::First = T::First` would
-// otherwise leak a private trait's associated type (E0446).
 #[doc(hidden)]
 pub trait Token: 'static {
-    type First: First;
-
     // Err: the position the mismatch actually occurred at (past `pos` if a
     // prefix of the chain matched), paired with what was expected there.
     fn scan_at(
@@ -800,8 +782,6 @@ pub trait Token: 'static {
 }
 
 impl Token for () {
-    type First = EmptyFirst;
-
     fn scan_at(
         _input: &[u8],
         pos: usize,
@@ -819,8 +799,6 @@ impl Token for () {
 pub struct CharThen<const CH: char, T>(PhantomData<T>);
 
 impl<const CH: char, T: Token> Token for CharThen<CH, T> {
-    type First = CharFirst<CH>;
-
     #[inline(always)]
     fn scan_at(
         input: &[u8],
@@ -854,8 +832,6 @@ impl<const CH: char, T: Token> Token for CharThen<CH, T> {
 pub struct CharCIThen<const CH: char, T>(PhantomData<T>);
 
 impl<const CH: char, T: Token> Token for CharCIThen<CH, T> {
-    type First = CharFirstCI<CH>;
-
     #[inline(always)]
     fn scan_at(
         input: &[u8],
@@ -892,8 +868,6 @@ impl<const CH: char, T: Token> Token for CharCIThen<CH, T> {
 pub struct StringEq<T>(PhantomData<T>);
 
 impl<T: Token> Grammar for StringEq<T> {
-    type First = T::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         let end = Self::scan_at(input, pos, head, state)?;
@@ -924,19 +898,6 @@ impl<T: Token> Grammar for StringEq<T> {
 
     fn to_bnf() -> Expr {
         Expr::StringEq(T::expectation())
-    }
-
-    fn fail_at(
-        #[allow(unused_variables)] pos: usize,
-        #[allow(unused_variables, unused_mut)] mut state: State,
-    ) -> bool {
-        #[cfg(feature = "trace_pos")]
-        state.expect(
-            pos,
-            #[cfg(feature = "trace_expect")]
-            PendingExpectation::StringEq(T::expectation, T::expectation),
-        );
-        true
     }
 }
 
@@ -976,8 +937,6 @@ impl<T> Eq for StringEq<T> {}
 pub struct StringEqCI<T>(String, PhantomData<T>);
 
 impl<T: Token> Grammar for StringEqCI<T> {
-    type First = T::First;
-
     #[inline(always)]
     fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
         let end = Self::scan_at(input, pos, head, state)?;
@@ -1012,19 +971,6 @@ impl<T: Token> Grammar for StringEqCI<T> {
 
     fn to_bnf() -> Expr {
         Expr::StringEqCI(T::expectation())
-    }
-
-    fn fail_at(
-        #[allow(unused_variables)] pos: usize,
-        #[allow(unused_variables, unused_mut)] mut state: State,
-    ) -> bool {
-        #[cfg(feature = "trace_pos")]
-        state.expect(
-            pos,
-            #[cfg(feature = "trace_expect")]
-            PendingExpectation::StringEqCI(T::expectation, T::expectation),
-        );
-        true
     }
 }
 
