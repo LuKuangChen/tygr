@@ -326,6 +326,9 @@ pub struct Trace {
 
 #[cfg(feature = "trace_pos")]
 impl History {
+    // Inlined: at each call site the expectation is a constant, so building
+    // the record folds down to a position compare and a push.
+    #[inline(always)]
     pub fn expect(
         &mut self,
         #[cfg(feature = "trace_one_node")] context: Context<'_>,
