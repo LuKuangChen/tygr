@@ -737,12 +737,15 @@ fn impl_enum(
 
 /// An enum's `parse_at` or `scan_at` body (`kind` is "parse" or "scan"), and
 /// the methods it uses: ordered choice over the variants, each an
-/// always-inlined method so that a known first byte reaches its first test.
-/// From `ARMS_THRESHOLD` variants on, the choice is compiled once per first
-/// byte (and once for the end of the input), and the body jumps to the copy
-/// for the actual byte. Knowing the byte, the compiler cuts each variant that
-/// cannot start with it down to its failure branch and skips the first test
-/// of those that can; copies that come out the same are merged.
+/// always-inlined method so that what is known about the first byte reaches
+/// its first test.
+///
+/// From `ARMS_THRESHOLD` variants on, the choice is compiled once per group of
+/// first bytes (see [`byte_groups`]) and once for the end of the input, and
+/// the body jumps to the copy for the actual byte. Knowing the byte, or its
+/// range, the compiler cuts each variant that cannot start with it down to its
+/// failure branch and skips the first test of those that can; copies that come
+/// out the same are merged.
 fn enum_choice(kind: &str, bodies: &[TokenStream2], ret: TokenStream2) -> (TokenStream2, TokenStream2) {
     const ARMS_THRESHOLD: usize = 4;
     let variants: Vec<Ident> = (0..bodies.len()).map(|k| format_ident!("{kind}_variant_{k}")).collect();
@@ -763,17 +766,70 @@ fn enum_choice(kind: &str, bodies: &[TokenStream2], ret: TokenStream2) -> (Token
         return (choice, items);
     }
     let arm = format_ident!("{kind}_arm");
-    let arms = format_ident!("{}_ARMS", kind.to_uppercase());
-    let xs = 0..=256u16;
+    let arm_end = format_ident!("{kind}_arm_end");
     items.extend(quote! {
+        // `byte` is in `LO..=HI` (the caller matched it); checking again here
+        // tells the compiler so. A one-byte group makes it a constant.
         #[inline(never)]
         #[allow(unused_mut)]
-        fn #arm<const X: u16>(input: &str, pos: usize, mut state: ::tygr::State) -> #ret {
-            let __head = u8::try_from(X).ok();
+        fn #arm<const LO: u8, const HI: u8>(input: &str, pos: usize, byte: u8, mut state: ::tygr::State) -> #ret {
+            let __head = if LO == HI {
+                Some(LO)
+            } else if (LO..=HI).contains(&byte) {
+                Some(byte)
+            } else {
+                return None;
+            };
             #choice
         }
 
-        const #arms: [fn(&str, usize, ::tygr::State<'_>) -> #ret; 257] = [ #(Self::#arm::<#xs>),* ];
+        #[inline(never)]
+        #[allow(unused_mut)]
+        fn #arm_end(input: &str, pos: usize, mut state: ::tygr::State) -> #ret {
+            let __head = None;
+            #choice
+        }
     });
-    (quote! { Self::#arms[__head.map_or(256, usize::from)](input, pos, state) }, items)
+    let cases = byte_groups().into_iter().map(|(lo, hi)| {
+        quote! { Some(byte @ #lo..=#hi) => Self::#arm::<#lo, #hi>(input, pos, byte, state), }
+    });
+    (
+        quote! {
+            match __head {
+                #(#cases)*
+                None => Self::#arm_end(input, pos, state),
+            }
+        },
+        items,
+    )
+}
+
+/// The byte ranges an enum's choice is compiled for: each ASCII punctuation
+/// and whitespace byte alone (literals start with these), and each run of
+/// digits, upper case letters, lower case letters, other control bytes or
+/// non-ASCII bytes together.
+fn byte_groups() -> Vec<(u8, u8)> {
+    fn kind(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(0),
+            b'A'..=b'Z' => Some(1),
+            b'a'..=b'z' => Some(2),
+            0x80.. => Some(3),
+            _ if b.is_ascii_control() && !b.is_ascii_whitespace() => Some(4),
+            _ => None,
+        }
+    }
+    let mut groups = Vec::new();
+    let mut lo = 0u8;
+    loop {
+        let mut hi = lo;
+        while kind(lo).is_some() && hi < u8::MAX && kind(hi + 1) == kind(lo) {
+            hi += 1;
+        }
+        groups.push((lo, hi));
+        if hi == u8::MAX {
+            return groups;
+        }
+        lo = hi + 1;
+    }
 }
