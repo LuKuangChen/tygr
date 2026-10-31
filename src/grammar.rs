@@ -1,7 +1,7 @@
 //! Core [`Grammar`] trait and blanket implementations for standard Rust types.
 //!
 //! Every grammar type implements [`Grammar`], providing:
-//! - **parsing**  — `parse_at(input, pos, State) → Option<(Self, usize)>`
+//! - **parsing**  — `parse_at(input, pos, head, State) → Option<(Self, usize)>`
 //! - **printing** — `print_to(&self, buf)`
 //! - **BNF**      — `to_bnf() -> Expr`
 //!
@@ -10,7 +10,6 @@
 //! See the crate-level `## Design` section for how Rust constructs map to
 //! EBNF concepts.
 
-use crate::first::{EmptyFirst, First};
 #[cfg(feature = "trace_one_node")]
 use crate::state::Context;
 #[cfg(feature = "trace_pos")]
@@ -28,43 +27,6 @@ use tygr_derive::Grammar;
 /// Implement this by hand only for leaf/wrapper types; for `struct`s and
 /// `enum`s, `#[derive(Grammar)]` generates it (see the crate-level docs).
 pub trait Grammar: Sized + 'static {
-    /// The set of bytes (and whether empty input is valid) this grammar
-    /// could start with — used to fast-path-reject an alternative before
-    /// actually trying to parse it. A manual `impl Grammar` picks its
-    /// `First` one of three ways, in order of preference:
-    ///
-    /// 1. **Delegate** to a grammar this one wraps or forwards to:
-    ///    `type First = T::First;` (e.g. [`Raw<T>`](Raw), `Box<T>`).
-    /// 2. **Build from a known, finite set of characters**: start from
-    ///    [`first::Never`](crate::first::Never) (matches no byte, not
-    ///    nullable) and chain
-    ///    [`WithChar<C>`](crate::first::First::WithChar) /
-    ///    [`WithCharCI<C>`](crate::first::First::WithCharCI) for each
-    ///    character; finish with
-    ///    [`Nullable`](crate::first::First::Nullable) if the grammar can
-    ///    also match empty input.
-    /// 3. **Over-approximate with [`first::AnyChar`](crate::first::AnyChar)**
-    ///    (matches any byte) when the starting characters can't be
-    ///    enumerated at compile time — e.g. behind an arbitrary runtime
-    ///    predicate. `AnyChar` by itself is *not* nullable; add
-    ///    [`Nullable`](crate::first::First::Nullable) if the grammar can
-    ///    also match empty input.
-    ///
-    /// ```
-    /// # use tygr::*;
-    /// # use tygr::first::*;
-    /// // Case 2: matches 'a' or 'b', not nullable.
-    /// type AOrB = <<Never as First>::WithChar<'a'> as First>::WithChar<'b'>;
-    ///
-    /// // Case 3, nullable: matches any single character, or none.
-    /// type MaybeAnyChar = <AnyChar as First>::Nullable;
-    ///
-    /// fn assert_first<T: First>() {}
-    /// assert_first::<AOrB>();
-    /// assert_first::<MaybeAnyChar>();
-    /// ```
-    type First: First;
-
     /// Parse the entire `input` as `Self`, failing if any input is left unconsumed.
     fn parse(input: &str) -> Result<Self, Error> {
         #[cfg(feature = "trace_pos")]
@@ -77,7 +39,7 @@ pub trait Grammar: Sized + 'static {
             #[cfg(feature = "trace_one_node")]
             context,
         );
-        if let Some((val, pos)) = Self::parse_at(input, 0, state)
+        if let Some((val, pos)) = Self::parse_at(input, 0, head_at(input, 0), state)
             && pos == input.len()
         {
             Ok(val)
@@ -103,7 +65,7 @@ pub trait Grammar: Sized + 'static {
             #[cfg(feature = "trace_one_node")]
             context,
         );
-        if let Some((val, pos)) = Self::parse_at(input, 0, state) {
+        if let Some((val, pos)) = Self::parse_at(input, 0, head_at(input, 0), state) {
             Ok((val, pos))
         } else {
             Err(make_error(
@@ -126,7 +88,7 @@ pub trait Grammar: Sized + 'static {
             #[cfg(feature = "trace_one_node")]
             context,
         );
-        if let Some(pos) = Self::scan_at(input, 0, state)
+        if let Some(pos) = Self::scan_at(input, 0, head_at(input, 0), state)
             && pos == input.len()
         {
             Ok(())
@@ -152,7 +114,7 @@ pub trait Grammar: Sized + 'static {
             #[cfg(feature = "trace_one_node")]
             context,
         );
-        if let Some(pos) = Self::scan_at(input, 0, state) {
+        if let Some(pos) = Self::scan_at(input, 0, head_at(input, 0), state) {
             Ok(pos)
         } else {
             Err(make_error(
@@ -163,12 +125,14 @@ pub trait Grammar: Sized + 'static {
     }
 
     /// Attempt to parse `Self` starting at `pos`, returning the value and the
-    /// position just past it, or `None` on failure.
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)>;
+    /// position just past it, or `None` on failure. `head` is the byte at
+    /// `pos` ([`head_at`]): a caller that knows it as a constant, like an
+    /// enum's arm for that byte, lets the compiler specialize the parse on it.
+    fn parse_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<(Self, usize)>;
 
     /// Like [`parse_at`](Self::parse_at), but only checks well-formedness and
     /// returns the end position.
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize>;
+    fn scan_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<usize>;
 
     /// Serialize `self` back to text, appending to `buf`.
     fn print_to(&self, buf: &mut String);
@@ -177,24 +141,19 @@ pub trait Grammar: Sized + 'static {
     /// referencing rule's own definition.
     fn to_bnf() -> Expr;
 
-    /// Record what this grammar would have expected at `pos`, without
-    /// attempting to actually parse — used when a caller already knows (e.g.
-    /// via `First`) that this alternative cannot match here, but still wants
-    /// it traced.
-    ///
-    /// Returns whether this grammar is *required* at `pos` (`Self::First`
-    /// doesn't contain nil). Sequential composition (`A::fail_at(..) ||
-    /// B::fail_at(..)`) can stop once a required element reports itself,
-    /// since real parsing would never reach anything after it either;
-    /// nullable elements return `false` so the chain keeps going.
-    fn fail_at(pos: usize, state: State) -> bool;
-
     /// Serialize `self` to a new `String`; see [`print_to`](Self::print_to).
     fn print(&self) -> String {
         let mut buf = String::new();
         self.print_to(&mut buf);
         buf
     }
+}
+
+/// The byte at `pos`, if any: the `head` argument of
+/// [`parse_at`](Grammar::parse_at) and [`scan_at`](Grammar::scan_at).
+#[inline(always)]
+pub fn head_at(input: &str, pos: usize) -> Option<u8> {
+    input.as_bytes().get(pos).copied()
 }
 
 /// A [`Grammar`] with a name and top-level BNF definition, so it can appear as
@@ -308,17 +267,15 @@ impl<T> Raw<T> {
 }
 
 impl<T: Grammar> Grammar for Raw<T> {
-    type First = T::First;
-
-    #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
-        let new_pos = T::scan_at(input, pos, state)?;
+    #[inline(always)]
+    fn parse_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<(Self, usize)> {
+        let new_pos = T::scan_at(input, pos, head, state)?;
         Some((Raw(input[pos..new_pos].to_string(), PhantomData), new_pos))
     }
 
-    #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
-        let end = T::scan_at(input, pos, state)?;
+    #[inline(always)]
+    fn scan_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<usize> {
+        let end = T::scan_at(input, pos, head, state)?;
         Some(end)
     }
 
@@ -328,10 +285,6 @@ impl<T: Grammar> Grammar for Raw<T> {
 
     fn to_bnf() -> Expr {
         T::to_bnf()
-    }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state)
     }
 }
 
@@ -395,19 +348,17 @@ impl<T> From<String> for Raw<T> {
 }
 
 impl<T: Grammar> Grammar for Option<T> {
-    type First = <T::First as First>::Nullable;
-
-    #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
-        match T::parse_at(input, pos, state) {
+    #[inline(always)]
+    fn parse_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<(Self, usize)> {
+        match T::parse_at(input, pos, head, state) {
             Some((val, new_pos)) => Some((Some(val), new_pos)),
             None => Some((None, pos)),
         }
     }
 
-    #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
-        match T::scan_at(input, pos, state) {
+    #[inline(always)]
+    fn scan_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<usize> {
+        match T::scan_at(input, pos, head, state) {
             Some(end_pos) => Some(end_pos),
             None => Some(pos),
         }
@@ -422,36 +373,41 @@ impl<T: Grammar> Grammar for Option<T> {
     fn to_bnf() -> Expr {
         Expr::optional(T::to_bnf())
     }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state);
-        false
-    }
 }
 
 impl<T: Grammar> Grammar for Vec<T> {
-    type First = <T::First as First>::Nullable;
-
-    #[inline]
-    fn parse_at(input: &str, mut pos: usize, mut state: State) -> Option<(Self, usize)> {
+    #[inline(always)]
+    fn parse_at(
+        input: &str,
+        mut pos: usize,
+        mut head: Option<u8>,
+        mut state: State,
+    ) -> Option<(Self, usize)> {
         let mut items: Vec<T> = Vec::new();
-        while let Some((val, new_pos)) = { T::parse_at(input, pos, state.reborrow()) } {
+        while let Some((val, new_pos)) = { T::parse_at(input, pos, head, state.reborrow()) } {
             if new_pos == pos {
                 break;
             }
             items.push(val);
             pos = new_pos;
+            head = head_at(input, pos);
         }
         Some((items, pos))
     }
 
-    #[inline]
-    fn scan_at(input: &str, mut pos: usize, mut state: State) -> Option<usize> {
-        while let Some(new_pos) = { T::scan_at(input, pos, state.reborrow()) } {
+    #[inline(always)]
+    fn scan_at(
+        input: &str,
+        mut pos: usize,
+        mut head: Option<u8>,
+        mut state: State,
+    ) -> Option<usize> {
+        while let Some(new_pos) = { T::scan_at(input, pos, head, state.reborrow()) } {
             if new_pos == pos {
                 break;
             }
             pos = new_pos;
+            head = head_at(input, pos);
         }
         Some(pos)
     }
@@ -465,23 +421,18 @@ impl<T: Grammar> Grammar for Vec<T> {
     fn to_bnf() -> Expr {
         Expr::repetition(T::to_bnf())
     }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state);
-        false
-    }
 }
 
 impl<T: Grammar> Grammar for Box<T> {
-    type First = T::First;
-
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
-        let (val, new_pos) = T::parse_at(input, pos, state)?;
+    #[inline(always)]
+    fn parse_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<(Self, usize)> {
+        let (val, new_pos) = T::parse_at(input, pos, head, state)?;
         Some((Box::new(val), new_pos))
     }
 
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
-        T::scan_at(input, pos, state)
+    #[inline(always)]
+    fn scan_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<usize> {
+        T::scan_at(input, pos, head, state)
     }
 
     fn print_to(&self, buf: &mut String) {
@@ -491,22 +442,21 @@ impl<T: Grammar> Grammar for Box<T> {
     fn to_bnf() -> Expr {
         T::to_bnf()
     }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state)
-    }
 }
 
 impl Grammar for () {
-    type First = EmptyFirst;
-
-    #[inline]
-    fn parse_at(_input: &str, pos: usize, _state: State) -> Option<(Self, usize)> {
+    #[inline(always)]
+    fn parse_at(
+        _input: &str,
+        pos: usize,
+        _head: Option<u8>,
+        _state: State,
+    ) -> Option<(Self, usize)> {
         Some(((), pos))
     }
 
-    #[inline]
-    fn scan_at(_input: &str, pos: usize, _state: State) -> Option<usize> {
+    #[inline(always)]
+    fn scan_at(_input: &str, pos: usize, _head: Option<u8>, _state: State) -> Option<usize> {
         Some(pos)
     }
 
@@ -515,57 +465,48 @@ impl Grammar for () {
     fn to_bnf() -> Expr {
         Expr::empty()
     }
-
-    fn fail_at(_pos: usize, _state: State) -> bool {
-        false
-    }
-}
-
-macro_rules! concat_first {
-    ($acc:ty;) => { $acc };
-    ($acc:ty; $T:ident $(, $rest:ident)*) => {
-        concat_first!(<$acc as First>::Concat<$T>; $($rest),*)
-    };
 }
 
 macro_rules! impl_grammar_tuple {
     ($($idx:tt $T:ident),+) => {
         impl<$($T: Grammar),+> Grammar for ($($T,)+) {
-            type First = concat_first!(EmptyFirst; $($T),+);
-
-            #[inline]
+            #[inline(always)]
             fn parse_at(
                 input: &str,
                 pos: usize,
+                head: Option<u8>,
                 #[allow(unused_mut)] mut state: State,
             ) -> Option<(Self, usize)> {
                 let i = 0;
                 $(
                     #[allow(non_snake_case)]
-                    let ($T, pos) = <$T>::parse_at(input, pos, state.reborrow())?;
+                    let ($T, pos) = <$T>::parse_at(input, pos, head, state.reborrow())?;
+                    #[allow(unused_variables)]
+                    let head = head_at(input, pos);
                     #[allow(unused_variables)]
                     let i = i + 1;
                 )+
                 Some((($($T,)+), pos))
             }
 
-            #[inline]
+            #[inline(always)]
             fn scan_at(
                 input: &str,
                 pos: usize,
+                head: Option<u8>,
                 #[allow(unused_mut)] mut state: State,
             ) -> Option<usize> {
                 let i = 0;
                 $(
                     #[allow(non_snake_case)]
-                    let pos =<$T>::scan_at(input, pos, state.reborrow())?;
+                    let pos = <$T>::scan_at(input, pos, head, state.reborrow())?;
+                    #[allow(unused_variables)]
+                    let head = head_at(input, pos);
                     #[allow(unused_variables)]
                     let i = i + 1;
                 )+
                 Some(pos)
             }
-
-
 
             fn print_to(&self, buf: &mut String) {
                 $(self.$idx.print_to(buf);)+
@@ -575,9 +516,6 @@ macro_rules! impl_grammar_tuple {
                 Expr::sequence(vec![$(<$T>::to_bnf()),+])
             }
 
-            fn fail_at(pos: usize, #[allow(unused_mut)] mut state: State) -> bool {
-                $( <$T>::fail_at(pos, state.reborrow()) || )+ false
-            }
         }
     };
 }
@@ -596,18 +534,24 @@ impl_grammar_tuple!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H, 8 I, 9 J, 10 K);
 use either::Either::*;
 
 impl<A: Grammar, B: Grammar> Grammar for either::Either<A, B> {
-    type First = <A::First as First>::Union<B::First>;
-
-    #[inline]
-    fn parse_at(input: &str, pos: usize, mut state: State) -> Option<(Self, usize)> {
-        A::parse_at(input, pos, state.reborrow())
+    #[inline(always)]
+    fn parse_at(
+        input: &str,
+        pos: usize,
+        head: Option<u8>,
+        mut state: State,
+    ) -> Option<(Self, usize)> {
+        A::parse_at(input, pos, head, state.reborrow())
             .map(|(x, end_pos)| (Left(x), end_pos))
-            .or_else(|| B::parse_at(input, pos, state).map(|(x, end_pos)| (Right(x), end_pos)))
+            .or_else(|| {
+                B::parse_at(input, pos, head, state).map(|(x, end_pos)| (Right(x), end_pos))
+            })
     }
 
-    #[inline]
-    fn scan_at(input: &str, pos: usize, mut state: State) -> Option<usize> {
-        A::scan_at(input, pos, state.reborrow()).or_else(|| B::scan_at(input, pos, state))
+    #[inline(always)]
+    fn scan_at(input: &str, pos: usize, head: Option<u8>, mut state: State) -> Option<usize> {
+        A::scan_at(input, pos, head, state.reborrow())
+            .or_else(|| B::scan_at(input, pos, head, state))
     }
 
     fn print_to(&self, buf: &mut String) {
@@ -619,12 +563,6 @@ impl<A: Grammar, B: Grammar> Grammar for either::Either<A, B> {
 
     fn to_bnf() -> Expr {
         Expr::alternation(vec![A::to_bnf(), B::to_bnf()])
-    }
-
-    fn fail_at(pos: usize, mut state: State) -> bool {
-        let a = A::fail_at(pos, state.reborrow());
-        let b = B::fail_at(pos, state);
-        a && b
     }
 }
 
@@ -643,19 +581,17 @@ impl<A: Grammar, B: Grammar> Grammar for either::Either<A, B> {
 pub struct NotFollowedBy<G>(PhantomData<G>);
 
 impl<G: Grammar> Grammar for NotFollowedBy<G> {
-    type First = EmptyFirst;
-
-    #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
-        let pos = Self::scan_at(input, pos, state)?;
+    #[inline(always)]
+    fn parse_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<(Self, usize)> {
+        let pos = Self::scan_at(input, pos, head, state)?;
         Some((NotFollowedBy(PhantomData), pos))
     }
 
-    #[inline]
-    fn scan_at(input: &str, pos: usize, mut state: State) -> Option<usize> {
+    #[inline(always)]
+    fn scan_at(input: &str, pos: usize, head: Option<u8>, mut state: State) -> Option<usize> {
         // Silent lookahead: probe G on a throwaway history so a match (or miss)
         // doesn't pollute the real error trace.
-        match state.probe(|state| G::scan_at(input, pos, state)) {
+        match state.probe(|state| G::scan_at(input, pos, head, state)) {
             Some(_) => None,
             None => Some(pos),
         }
@@ -665,10 +601,6 @@ impl<G: Grammar> Grammar for NotFollowedBy<G> {
 
     fn to_bnf() -> Expr {
         Expr::NotFollowedBy(Box::new(G::to_bnf()))
-    }
-
-    fn fail_at(_pos: usize, _state: State) -> bool {
-        false
     }
 }
 
@@ -798,11 +730,9 @@ impl<T, E> Range<Result<T, E>> {
 }
 
 impl<T: Grammar> Grammar for Range<T> {
-    type First = T::First;
-
-    #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
-        if let Some((it, new_pos)) = T::parse_at(input, pos, state) {
+    #[inline(always)]
+    fn parse_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<(Self, usize)> {
+        if let Some((it, new_pos)) = T::parse_at(input, pos, head, state) {
             Some((
                 Range {
                     start: pos,
@@ -816,9 +746,9 @@ impl<T: Grammar> Grammar for Range<T> {
         }
     }
 
-    #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
-        T::scan_at(input, pos, state)
+    #[inline(always)]
+    fn scan_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<usize> {
+        T::scan_at(input, pos, head, state)
     }
 
     fn print_to(&self, buf: &mut String) {
@@ -827,10 +757,6 @@ impl<T: Grammar> Grammar for Range<T> {
 
     fn to_bnf() -> Expr {
         T::to_bnf()
-    }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state)
     }
 }
 
@@ -847,11 +773,9 @@ impl<T> Deref for Vec1<T> {
 }
 
 impl<T: Grammar> Grammar for Vec1<T> {
-    type First = T::First;
-
-    #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
-        let (x, pos) = <Vec<T>>::parse_at(input, pos, state).unwrap();
+    #[inline(always)]
+    fn parse_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<(Self, usize)> {
+        let (x, pos) = <Vec<T>>::parse_at(input, pos, head, state).unwrap();
         if x.is_empty() {
             None
         } else {
@@ -859,9 +783,9 @@ impl<T: Grammar> Grammar for Vec1<T> {
         }
     }
 
-    #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
-        let end = <Vec<T>>::scan_at(input, pos, state).unwrap();
+    #[inline(always)]
+    fn scan_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<usize> {
+        let end = <Vec<T>>::scan_at(input, pos, head, state).unwrap();
         if end == pos { None } else { Some(end) }
     }
 
@@ -874,36 +798,26 @@ impl<T: Grammar> Grammar for Vec1<T> {
     fn to_bnf() -> Expr {
         Expr::sequence(vec![T::to_bnf(), <Vec<T>>::to_bnf()])
     }
-
-    fn fail_at(pos: usize, mut state: State) -> bool {
-        T::fail_at(pos, state.reborrow()) || <Vec<T>>::fail_at(pos, state)
-    }
 }
 
 /// Consumes and discards input matching `T`, storing nothing. Prints nothing
 /// back, since there's no value left to print.
 impl<T: Grammar> Grammar for PhantomData<T> {
-    type First = T::First;
-
-    #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
-        let pos = Self::scan_at(input, pos, state)?;
+    #[inline(always)]
+    fn parse_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<(Self, usize)> {
+        let pos = Self::scan_at(input, pos, head, state)?;
         Some((PhantomData, pos))
     }
 
-    #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
-        T::scan_at(input, pos, state)
+    #[inline(always)]
+    fn scan_at(input: &str, pos: usize, head: Option<u8>, state: State) -> Option<usize> {
+        T::scan_at(input, pos, head, state)
     }
 
     fn print_to(&self, _buf: &mut String) {}
 
     fn to_bnf() -> Expr {
         T::to_bnf()
-    }
-
-    fn fail_at(pos: usize, state: State) -> bool {
-        T::fail_at(pos, state)
     }
 }
 
