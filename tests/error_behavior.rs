@@ -138,7 +138,7 @@ struct NonZero(StringOf1<IsDigit>);
 impl Validate for NonZero {
     const REQUIREMENT: &'static str = "be non-zero";
     fn validate(&self) -> bool {
-        !self.0.starts_with('0')
+        !self.0.starts_with(b"0")
     }
 }
 

@@ -60,15 +60,15 @@ pub trait CharClass: 'static {
     /// the default decodes the char and calls `matches`.
     #[doc(hidden)]
     #[inline(always)]
-    fn check_at(input: &str, pos: usize) -> bool {
-        Self::matches(decode_at(input, pos, input.as_bytes()[pos]))
+    fn check_at(input: &[u8], pos: usize) -> bool {
+        decode_at(input, pos, input[pos]).is_some_and(Self::matches)
     }
 
     /// Is the char at byte `pos`, whose first byte is `first`, in the class?
     /// `LEAD_BYTES`, then `check_at`.
     #[doc(hidden)]
     #[inline(always)]
-    fn has_char_at(input: &str, pos: usize, first: u8) -> bool {
+    fn has_char_at(input: &[u8], pos: usize, first: u8) -> bool {
         match Self::LEAD_BYTES[first as usize] {
             Lead::Accept => true,
             Lead::Reject => false,
@@ -278,8 +278,8 @@ pub mod lead {
 
     /// Do the bytes at `pos` fall in one of `p`'s pieces?
     #[inline(always)]
-    pub fn pieces_match(p: &Pieces, input: &str, pos: usize) -> bool {
-        let b = &input.as_bytes()[pos..];
+    pub fn pieces_match(p: &Pieces, input: &[u8], pos: usize) -> bool {
+        let b = &input[pos..];
         p.list[..p.n]
             .iter()
             .any(|q| q.len <= b.len() && (0..q.len).all(|k| q.lo[k] <= b[k] && b[k] <= q.hi[k]))
@@ -347,7 +347,7 @@ impl<const LO: char, const HI: char> CharClass for CharRange<LO, HI> {
     const LEAD_BYTES: [Lead; 256] = lead::range(LO, HI);
 
     #[inline(always)]
-    fn check_at(input: &str, pos: usize) -> bool {
+    fn check_at(input: &[u8], pos: usize) -> bool {
         lead::pieces_match(&Self::PIECES, input, pos)
     }
 }
@@ -371,8 +371,8 @@ impl<T: CharList> CharClass for StringEq<T> {
     const LEAD_BYTES: [Lead; 256] = T::LEAD_BYTES;
 
     #[inline(always)]
-    fn check_at(input: &str, pos: usize) -> bool {
-        T::starts(&input.as_bytes()[pos..])
+    fn check_at(input: &[u8], pos: usize) -> bool {
+        T::starts(&input[pos..])
     }
 }
 
@@ -426,8 +426,8 @@ impl<A: CharClass, B: CharClass> CharClass for Union<A, B> {
     const LEAD_BYTES: [Lead; 256] = lead::union(&A::LEAD_BYTES, &B::LEAD_BYTES);
 
     #[inline(always)]
-    fn check_at(input: &str, pos: usize) -> bool {
-        let b = input.as_bytes()[pos];
+    fn check_at(input: &[u8], pos: usize) -> bool {
+        let b = input[pos];
         A::has_char_at(input, pos, b) || B::has_char_at(input, pos, b)
     }
 }
@@ -448,8 +448,8 @@ impl<A: CharClass, B: CharClass> CharClass for Except<A, B> {
     const LEAD_BYTES: [Lead; 256] = lead::except(&A::LEAD_BYTES, &B::LEAD_BYTES);
 
     #[inline(always)]
-    fn check_at(input: &str, pos: usize) -> bool {
-        let b = input.as_bytes()[pos];
+    fn check_at(input: &[u8], pos: usize) -> bool {
+        let b = input[pos];
         A::has_char_at(input, pos, b) && !B::has_char_at(input, pos, b)
     }
 }
@@ -494,14 +494,13 @@ impl<M: CharClass> Grammar for CharOf<M> {
 
     #[inline]
     fn parse_at(
-        input: &str,
+        input: &[u8],
         pos: usize,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Option<(Self, usize)> {
-        let ch = match input.as_bytes().get(pos) {
+        let ch = match input.get(pos) {
             Some(&b) if M::has_char_at(input, pos, b) => {
-                let c = decode_at(input, pos, b);
-                Some((c, c.len_utf8()))
+                decode_at(input, pos, b).map(|c| (c, c.len_utf8()))
             }
             _ => None,
         };
@@ -519,7 +518,7 @@ impl<M: CharClass> Grammar for CharOf<M> {
     }
 
     #[inline]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
         Self::parse_at(input, pos, state).map(|(_, pos)| pos)
     }
 
@@ -545,21 +544,24 @@ impl<M: CharClass> Grammar for CharOf<M> {
     }
 }
 
-/// The char starting at byte `pos`, whose first byte is `b`.
+/// The char starting at byte `pos`, whose first byte is `b`, or `None` if
+/// the bytes there are not UTF-8.
 #[inline(always)]
-fn decode_at(input: &str, pos: usize, b: u8) -> char {
+fn decode_at(input: &[u8], pos: usize, b: u8) -> Option<char> {
     if b < 0x80 {
-        // One-byte char: skip `str`'s boundary check.
-        b as char
-    } else {
-        input[pos..].chars().next().unwrap()
+        return Some(b as char);
     }
+    // Leading ones give the sequence length; a byte that cannot start one
+    // gets a length `from_utf8` will reject.
+    let len = (b.leading_ones() as usize).clamp(2, 4);
+    let bytes = input.get(pos..pos + len)?;
+    std::str::from_utf8(bytes).ok()?.chars().next()
 }
 
 /// Length of the longest run of chars in class `C` starting at `pos`.
 #[inline(always)]
-fn scan_run<C: CharClass>(input: &str, mut pos: usize) -> usize {
-    let b = input.as_bytes();
+fn scan_run<C: CharClass>(input: &[u8], mut pos: usize) -> usize {
+    let b = input;
     // Bytes that start only accepted chars, plus continuation bytes: the
     // loop meets one only right after accepting the byte before it, which
     // was part of the same char. So an accepted char is consumed a byte at a
@@ -624,14 +626,14 @@ impl<C: CharClass> Grammar for StringOf<C> {
     type First = <Raw<Vec<CharOf<C>>> as Grammar>::First;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         let end = Self::scan_at(input, pos, state)?;
-        Some((StringOf(Raw::new(&input[pos..end])), end))
+        Some((StringOf(Raw::from_bytes(&input[pos..end])), end))
     }
 
     #[inline(always)]
     fn scan_at(
-        input: &str,
+        input: &[u8],
         pos: usize,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Option<usize> {
@@ -668,14 +670,14 @@ impl<C: CharClass> Grammar for StringOf1<C> {
     type First = <Raw<(CharOf<C>, Vec<CharOf<C>>)> as Grammar>::First;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         let end = Self::scan_at(input, pos, state)?;
-        Some((StringOf1(Raw::new(&input[pos..end])), end))
+        Some((StringOf1(Raw::from_bytes(&input[pos..end])), end))
     }
 
     #[inline(always)]
     fn scan_at(
-        input: &str,
+        input: &[u8],
         pos: usize,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Option<usize> {
@@ -732,19 +734,35 @@ macro_rules! impl_string_wrapper {
             }
         }
         impl<C: CharClass> std::ops::Deref for $ty<C> {
-            type Target = str;
-            fn deref(&self) -> &str {
+            type Target = [u8];
+            fn deref(&self) -> &[u8] {
                 &self.0
             }
         }
-        impl<C: CharClass> AsRef<str> for $ty<C> {
-            fn as_ref(&self) -> &str {
+        impl<C: CharClass> AsRef<[u8]> for $ty<C> {
+            fn as_ref(&self) -> &[u8] {
                 &self.0
             }
         }
-        impl<C: CharClass> IntoInner<String> for $ty<C> {
-            fn into_inner(self) -> String {
-                self.0.0
+        impl<C: CharClass> IntoInner<Vec<u8>> for $ty<C> {
+            fn into_inner(self) -> Vec<u8> {
+                self.0.into_bytes()
+            }
+        }
+        impl<C: CharClass> $ty<C> {
+            /// The matched bytes.
+            pub fn as_bytes(&self) -> &[u8] {
+                self.0.as_bytes()
+            }
+
+            /// The matched text, if it is UTF-8.
+            pub fn as_str(&self) -> Result<&str, std::str::Utf8Error> {
+                self.0.as_str()
+            }
+
+            /// The matched text, owned, if it is UTF-8.
+            pub fn into_string(self) -> Result<String, std::string::FromUtf8Error> {
+                self.0.into_string()
             }
         }
     };
@@ -763,7 +781,7 @@ pub trait Token: 'static {
 
     // Err: the position the mismatch actually occurred at (past `pos` if a
     // prefix of the chain matched), paired with what was expected there.
-    fn scan_at(input: &str, pos: usize, state: State) -> Result<usize, (usize, fn() -> String)>;
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Result<usize, (usize, fn() -> String)>;
 
     fn add_expectation(str: &mut String);
 
@@ -777,7 +795,7 @@ pub trait Token: 'static {
 impl Token for () {
     type First = EmptyFirst;
 
-    fn scan_at(_input: &str, pos: usize, _state: State) -> Result<usize, (usize, fn() -> String)> {
+    fn scan_at(_input: &[u8], pos: usize, _state: State) -> Result<usize, (usize, fn() -> String)> {
         Ok(pos)
     }
 
@@ -793,7 +811,7 @@ impl<const CH: char, T: Token> Token for CharThen<CH, T> {
 
     #[inline]
     fn scan_at(
-        input: &str,
+        input: &[u8],
         pos: usize,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Result<usize, (usize, fn() -> String)> {
@@ -801,7 +819,7 @@ impl<const CH: char, T: Token> Token for CharThen<CH, T> {
         // char-boundary check on every literal probe.
         let mut buf = [0u8; 4];
         let lit = CH.encode_utf8(&mut buf).as_bytes();
-        if input.as_bytes()[pos..].starts_with(lit) {
+        if input[pos..].starts_with(lit) {
             T::scan_at(input, pos + CH.len_utf8(), state)
         } else {
             Err((pos, Self::expectation))
@@ -822,13 +840,23 @@ impl<const CH: char, T: Token> Token for CharCIThen<CH, T> {
 
     #[inline]
     fn scan_at(
-        input: &str,
+        input: &[u8],
         pos: usize,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Result<usize, (usize, fn() -> String)> {
-        match input[pos..].chars().next() {
-            Some(c) if c.eq_ignore_ascii_case(&CH) => T::scan_at(input, pos + c.len_utf8(), state),
-            _ => Err((pos, Self::expectation)),
+        let mut buf = [0u8; 4];
+        let lit = CH.encode_utf8(&mut buf).as_bytes();
+        let hit = if CH.is_ascii() {
+            input
+                .get(pos)
+                .is_some_and(|b| b.eq_ignore_ascii_case(&(CH as u8)))
+        } else {
+            input[pos..].starts_with(lit)
+        };
+        if hit {
+            T::scan_at(input, pos + lit.len(), state)
+        } else {
+            Err((pos, Self::expectation))
         }
     }
 
@@ -846,14 +874,14 @@ impl<T: Token> Grammar for StringEq<T> {
     type First = T::First;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         let end = Self::scan_at(input, pos, state)?;
         Some((StringEq(PhantomData), end))
     }
 
     #[inline]
     #[cfg_attr(not(feature = "trace_pos"), allow(clippy::manual_ok_err))]
-    fn scan_at(input: &str, pos: usize, mut state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, mut state: State) -> Option<usize> {
         match T::scan_at(input, pos, state.reborrow()) {
             Ok(pos) => Some(pos),
             #[allow(unused_variables)]
@@ -930,14 +958,18 @@ impl<T: Token> Grammar for StringEqCI<T> {
     type First = T::First;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
         let end = Self::scan_at(input, pos, state)?;
-        Some((StringEqCI(input[pos..end].to_string(), PhantomData), end))
+        // The match is the literal with some ASCII letters' case changed,
+        // so it is UTF-8 whatever the rest of the input is.
+        let text =
+            String::from_utf8(input[pos..end].to_vec()).expect("case variant of a str literal");
+        Some((StringEqCI(text, PhantomData), end))
     }
 
     #[inline]
     #[cfg_attr(not(feature = "trace_pos"), allow(clippy::manual_ok_err))]
-    fn scan_at(input: &str, pos: usize, mut state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, mut state: State) -> Option<usize> {
         match T::scan_at(input, pos, state.reborrow()) {
             Ok(pos) => Some(pos),
             #[allow(unused_variables)]

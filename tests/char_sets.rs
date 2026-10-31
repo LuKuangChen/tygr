@@ -97,7 +97,7 @@ fn agrees<C: CharClass>() {
         buf.clear();
         buf.push(ch);
         assert_eq!(
-            C::has_char_at(&buf, 0, buf.as_bytes()[0]),
+            C::has_char_at(buf.as_bytes(), 0, buf.as_bytes()[0]),
             C::matches(ch),
             "{} at {ch:?}",
             std::any::type_name::<C>()

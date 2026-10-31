@@ -273,7 +273,7 @@ macro_rules! const_char_class {
             fn name() -> &'static str { $label }
             // A one-byte char: the inlined predicate is cheaper than a table load.
             #[inline(always)]
-            fn has_char_at(input: &str, pos: usize, b: u8) -> bool {
+            fn has_char_at(input: &[u8], pos: usize, b: u8) -> bool {
                 if b < 0x80 {
                     Self::matches_const(b as char)
                 } else {
@@ -323,8 +323,8 @@ macro_rules! const_char_class {
             }
             fn name() -> &'static str { $label }
             #[inline(always)]
-            fn check_at(input: &str, pos: usize) -> bool {
-                let b = input.as_bytes()[pos];
+            fn check_at(input: &[u8], pos: usize) -> bool {
+                let b = input[pos];
                 <$first as $crate::CharClass>::has_char_at(input, pos, b) $(|| <$rest as $crate::CharClass>::has_char_at(input, pos, b))*
             }
             const LEAD_BYTES: [$crate::Lead; 256] = {
@@ -418,7 +418,7 @@ impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
     type First = <VecSepSource<T, S> as Grammar>::First;
 
     #[inline]
-    fn parse_at(input: &str, pos: usize, mut state: State) -> Option<(Self, usize)> {
+    fn parse_at(input: &[u8], pos: usize, mut state: State) -> Option<(Self, usize)> {
         let (head, mut pos) = T::parse_at(input, pos, state.reborrow())?;
         // Not `vec![head]`: that allocates room for exactly one item, so a
         // second item always reallocates. Let `Vec`'s growth policy size it.
@@ -450,7 +450,7 @@ impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
     }
 
     #[inline(always)]
-    fn scan_at(input: &str, pos: usize, state: State) -> Option<usize> {
+    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
         <VecSepSource<T, S> as Grammar>::scan_at(input, pos, state)
     }
 
