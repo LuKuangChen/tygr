@@ -492,17 +492,17 @@ impl<M: CharClass> CharOf<M> {
 impl<M: CharClass> Grammar for CharOf<M> {
     type First = ClassFirst<M>;
 
-    #[inline]
+    #[inline(always)]
     fn parse_at(
         input: &[u8],
         pos: usize,
+        head: u32,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Option<(Self, usize)> {
-        let ch = match input.get(pos) {
-            Some(&b) if M::has_char_at(input, pos, b) => {
-                decode_at(input, pos, b).map(|c| (c, c.len_utf8()))
-            }
-            _ => None,
+        let ch = if head < 256 && M::has_char_at(input, pos, head as u8) {
+            decode_at(input, pos, head as u8).map(|c| (c, c.len_utf8()))
+        } else {
+            None
         };
         if let Some((ch, len)) = ch {
             Some((CharOf(ch, PhantomData), pos + len))
@@ -517,9 +517,9 @@ impl<M: CharClass> Grammar for CharOf<M> {
         }
     }
 
-    #[inline]
-    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
-        Self::parse_at(input, pos, state).map(|(_, pos)| pos)
+    #[inline(always)]
+    fn scan_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<usize> {
+        Self::parse_at(input, pos, head, state).map(|(_, pos)| pos)
     }
 
     fn print_to(&self, buf: &mut String) {
@@ -625,9 +625,9 @@ pub struct StringOf<C: CharClass>(Raw<Vec<CharOf<C>>>);
 impl<C: CharClass> Grammar for StringOf<C> {
     type First = <Raw<Vec<CharOf<C>>> as Grammar>::First;
 
-    #[inline]
-    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
-        let end = Self::scan_at(input, pos, state)?;
+    #[inline(always)]
+    fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
+        let end = Self::scan_at(input, pos, head, state)?;
         Some((StringOf(Raw::from_bytes(&input[pos..end])), end))
     }
 
@@ -635,6 +635,7 @@ impl<C: CharClass> Grammar for StringOf<C> {
     fn scan_at(
         input: &[u8],
         pos: usize,
+        _head: u32,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Option<usize> {
         let end = scan_run::<C>(input, pos);
@@ -669,9 +670,9 @@ pub struct StringOf1<C: CharClass>(Raw<(CharOf<C>, Vec<CharOf<C>>)>);
 impl<C: CharClass> Grammar for StringOf1<C> {
     type First = <Raw<(CharOf<C>, Vec<CharOf<C>>)> as Grammar>::First;
 
-    #[inline]
-    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
-        let end = Self::scan_at(input, pos, state)?;
+    #[inline(always)]
+    fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
+        let end = Self::scan_at(input, pos, head, state)?;
         Some((StringOf1(Raw::from_bytes(&input[pos..end])), end))
     }
 
@@ -679,6 +680,7 @@ impl<C: CharClass> Grammar for StringOf1<C> {
     fn scan_at(
         input: &[u8],
         pos: usize,
+        _head: u32,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Option<usize> {
         let end = scan_run::<C>(input, pos);
@@ -781,7 +783,12 @@ pub trait Token: 'static {
 
     // Err: the position the mismatch actually occurred at (past `pos` if a
     // prefix of the chain matched), paired with what was expected there.
-    fn scan_at(input: &[u8], pos: usize, state: State) -> Result<usize, (usize, fn() -> String)>;
+    fn scan_at(
+        input: &[u8],
+        pos: usize,
+        head: u32,
+        state: State,
+    ) -> Result<usize, (usize, fn() -> String)>;
 
     fn add_expectation(str: &mut String);
 
@@ -795,7 +802,12 @@ pub trait Token: 'static {
 impl Token for () {
     type First = EmptyFirst;
 
-    fn scan_at(_input: &[u8], pos: usize, _state: State) -> Result<usize, (usize, fn() -> String)> {
+    fn scan_at(
+        _input: &[u8],
+        pos: usize,
+        _head: u32,
+        _state: State,
+    ) -> Result<usize, (usize, fn() -> String)> {
         Ok(pos)
     }
 
@@ -809,18 +821,24 @@ pub struct CharThen<const CH: char, T>(PhantomData<T>);
 impl<const CH: char, T: Token> Token for CharThen<CH, T> {
     type First = CharFirst<CH>;
 
-    #[inline]
+    #[inline(always)]
     fn scan_at(
         input: &[u8],
         pos: usize,
+        head: u32,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Result<usize, (usize, fn() -> String)> {
-        // Compare bytes directly: slicing `input[pos..]` would add a
-        // char-boundary check on every literal probe.
+        // The first byte is `head`; any further bytes of a multi-byte char
+        // come from the input.
         let mut buf = [0u8; 4];
         let lit = CH.encode_utf8(&mut buf).as_bytes();
-        if input[pos..].starts_with(lit) {
-            T::scan_at(input, pos + CH.len_utf8(), state)
+        if head == lit[0] as u32
+            && input
+                .get(pos + 1..)
+                .is_some_and(|rest| rest.starts_with(&lit[1..]))
+        {
+            let next = pos + lit.len();
+            T::scan_at(input, next, crate::head_at(input, next), state)
         } else {
             Err((pos, Self::expectation))
         }
@@ -838,23 +856,26 @@ pub struct CharCIThen<const CH: char, T>(PhantomData<T>);
 impl<const CH: char, T: Token> Token for CharCIThen<CH, T> {
     type First = CharFirstCI<CH>;
 
-    #[inline]
+    #[inline(always)]
     fn scan_at(
         input: &[u8],
         pos: usize,
+        head: u32,
         #[allow(unused_variables, unused_mut)] mut state: State,
     ) -> Result<usize, (usize, fn() -> String)> {
         let mut buf = [0u8; 4];
         let lit = CH.encode_utf8(&mut buf).as_bytes();
         let hit = if CH.is_ascii() {
-            input
-                .get(pos)
-                .is_some_and(|b| b.eq_ignore_ascii_case(&(CH as u8)))
+            head < 256 && (head as u8).eq_ignore_ascii_case(&(CH as u8))
         } else {
-            input[pos..].starts_with(lit)
+            head == lit[0] as u32
+                && input
+                    .get(pos + 1..)
+                    .is_some_and(|rest| rest.starts_with(&lit[1..]))
         };
         if hit {
-            T::scan_at(input, pos + lit.len(), state)
+            let next = pos + lit.len();
+            T::scan_at(input, next, crate::head_at(input, next), state)
         } else {
             Err((pos, Self::expectation))
         }
@@ -873,16 +894,16 @@ pub struct StringEq<T>(PhantomData<T>);
 impl<T: Token> Grammar for StringEq<T> {
     type First = T::First;
 
-    #[inline]
-    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
-        let end = Self::scan_at(input, pos, state)?;
+    #[inline(always)]
+    fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
+        let end = Self::scan_at(input, pos, head, state)?;
         Some((StringEq(PhantomData), end))
     }
 
-    #[inline]
+    #[inline(always)]
     #[cfg_attr(not(feature = "trace_pos"), allow(clippy::manual_ok_err))]
-    fn scan_at(input: &[u8], pos: usize, mut state: State) -> Option<usize> {
-        match T::scan_at(input, pos, state.reborrow()) {
+    fn scan_at(input: &[u8], pos: usize, head: u32, mut state: State) -> Option<usize> {
+        match T::scan_at(input, pos, head, state.reborrow()) {
             Ok(pos) => Some(pos),
             #[allow(unused_variables)]
             Err((fail_pos, expectation)) => {
@@ -957,9 +978,9 @@ pub struct StringEqCI<T>(String, PhantomData<T>);
 impl<T: Token> Grammar for StringEqCI<T> {
     type First = T::First;
 
-    #[inline]
-    fn parse_at(input: &[u8], pos: usize, state: State) -> Option<(Self, usize)> {
-        let end = Self::scan_at(input, pos, state)?;
+    #[inline(always)]
+    fn parse_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<(Self, usize)> {
+        let end = Self::scan_at(input, pos, head, state)?;
         // The match is the literal with some ASCII letters' case changed,
         // so it is UTF-8 whatever the rest of the input is.
         let text =
@@ -967,10 +988,10 @@ impl<T: Token> Grammar for StringEqCI<T> {
         Some((StringEqCI(text, PhantomData), end))
     }
 
-    #[inline]
+    #[inline(always)]
     #[cfg_attr(not(feature = "trace_pos"), allow(clippy::manual_ok_err))]
-    fn scan_at(input: &[u8], pos: usize, mut state: State) -> Option<usize> {
-        match T::scan_at(input, pos, state.reborrow()) {
+    fn scan_at(input: &[u8], pos: usize, head: u32, mut state: State) -> Option<usize> {
+        match T::scan_at(input, pos, head, state.reborrow()) {
             Ok(pos) => Some(pos),
             #[allow(unused_variables)]
             Err((fail_pos, expectation)) => {

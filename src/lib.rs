@@ -417,20 +417,27 @@ impl<T: Grammar, S: Grammar> GrammarFrom for VecSep<T, S> {
 impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
     type First = <VecSepSource<T, S> as Grammar>::First;
 
-    #[inline]
-    fn parse_at(input: &[u8], pos: usize, mut state: State) -> Option<(Self, usize)> {
-        let (head, mut pos) = T::parse_at(input, pos, state.reborrow())?;
-        // Not `vec![head]`: that allocates room for exactly one item, so a
-        // second item always reallocates. Let `Vec`'s growth policy size it.
+    #[inline(always)]
+    fn parse_at(input: &[u8], pos: usize, head: u32, mut state: State) -> Option<(Self, usize)> {
+        let (first_item, mut pos) = T::parse_at(input, pos, head, state.reborrow())?;
+        // Not `vec![first_item]`: that allocates room for exactly one item, so
+        // a second item always reallocates. Let `Vec`'s growth policy size it.
         let mut items = Vec::new();
-        items.push(head);
+        items.push(first_item);
         let mut seps = Vec::new();
         // Same as `Vec<SepItem<S, T>>`: stop at the first `S T` that fails.
         loop {
-            let Some((sep, after_sep)) = S::parse_at(input, pos, state.reborrow()) else {
+            let Some((sep, after_sep)) =
+                S::parse_at(input, pos, head_at(input, pos), state.reborrow())
+            else {
                 break;
             };
-            let Some((item, after_item)) = T::parse_at(input, after_sep, state.reborrow()) else {
+            let Some((item, after_item)) = T::parse_at(
+                input,
+                after_sep,
+                head_at(input, after_sep),
+                state.reborrow(),
+            ) else {
                 break;
             };
             // A grammar where `S` and `T` can both match empty is not
@@ -450,8 +457,8 @@ impl<T: Grammar, S: Grammar> Grammar for VecSep<T, S> {
     }
 
     #[inline(always)]
-    fn scan_at(input: &[u8], pos: usize, state: State) -> Option<usize> {
-        <VecSepSource<T, S> as Grammar>::scan_at(input, pos, state)
+    fn scan_at(input: &[u8], pos: usize, head: u32, state: State) -> Option<usize> {
+        <VecSepSource<T, S> as Grammar>::scan_at(input, pos, head, state)
     }
 
     fn print_to(&self, buf: &mut String) {

@@ -306,7 +306,9 @@ fn parse_at(validated: bool, fields: &ProcessedFields, constructor: &TokenStream
         .iter()
         .map(|(_, x, t)| {
             quote! {
-                let (#x, pos) = <#t as ::tygr::Grammar>::parse_at(input, pos, state.reborrow())?;
+                let (#x, pos) = <#t as ::tygr::Grammar>::parse_at(input, pos, __head, state.reborrow())?;
+                #[allow(unused_variables)]
+                let __head = ::tygr::head_at(input, pos);
             }
         })
         .collect();
@@ -356,7 +358,9 @@ fn scan_at(validated: bool, fields: &ProcessedFields, constructor: &TokenStream2
             .iter()
             .map(|(_, _, t)| {
                 quote! {
-                    let pos = <#t as ::tygr::Grammar>::scan_at(input, pos, state.reborrow())?;
+                    let pos = <#t as ::tygr::Grammar>::scan_at(input, pos, __head, state.reborrow())?;
+                    #[allow(unused_variables)]
+                    let __head = ::tygr::head_at(input, pos);
                 }
             })
             .collect();
@@ -504,7 +508,7 @@ fn impl_convert(input: &DeriveInput, convert: Convert) -> syn::Result<TokenStrea
     };
     let parse_at = match convert {
         Convert::FromStr => quote! {
-            let end = <#source as ::tygr::Grammar>::scan_at(input, pos, state.reborrow())?;
+            let end = <#source as ::tygr::Grammar>::scan_at(input, pos, __head, state.reborrow())?;
             // Reading the match as text is where it must be UTF-8.
             match ::core::str::from_utf8(&input[pos..end]) {
                 Ok(text) => match <#self_ty as ::core::str::FromStr>::from_str(text) {
@@ -526,13 +530,13 @@ fn impl_convert(input: &DeriveInput, convert: Convert) -> syn::Result<TokenStrea
             }
         },
         Convert::From => quote! {
-            let (source, end) = <#source as ::tygr::Grammar>::parse_at(input, pos, state.reborrow())?;
+            let (source, end) = <#source as ::tygr::Grammar>::parse_at(input, pos, __head, state.reborrow())?;
             let value = <#self_ty as ::core::convert::From<#source>>::from(source);
             #validate
             Some((value, end))
         },
         Convert::TryFrom => quote! {
-            let (source, end) = <#source as ::tygr::Grammar>::parse_at(input, pos, state.reborrow())?;
+            let (source, end) = <#source as ::tygr::Grammar>::parse_at(input, pos, __head, state.reborrow())?;
             match <#self_ty as ::core::convert::TryFrom<#source>>::try_from(source) {
                 Ok(value) => {
                     #validate
@@ -551,11 +555,11 @@ fn impl_convert(input: &DeriveInput, convert: Convert) -> syn::Result<TokenStrea
     // run the full check via `parse_at`.
     let scan_at = if !validated && matches!(convert, Convert::From) {
         quote! {
-            <#source as ::tygr::Grammar>::scan_at(input, pos, state)
+            <#source as ::tygr::Grammar>::scan_at(input, pos, __head, state)
         }
     } else {
         quote! {
-            Self::parse_at(input, pos, state).map(|(_, end)| end)
+            Self::parse_at(input, pos, __head, state).map(|(_, end)| end)
         }
     };
     let to_bnf = quote! { <#source as ::tygr::Grammar>::to_bnf() };
@@ -581,13 +585,13 @@ fn impl_convert(input: &DeriveInput, convert: Convert) -> syn::Result<TokenStrea
         impl #impl_generics ::tygr::Grammar for #self_ty #where_clause {
             type First = <#source as ::tygr::Grammar>::First;
 
-            #[inline]
-            fn parse_at(input: &[u8], pos: usize, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
+            #[inline(always)]
+            fn parse_at(input: &[u8], pos: usize, __head: u32, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
                 #parse_at
             }
 
             #[inline(always)]
-            fn scan_at(input: &[u8], pos: usize, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<usize> {
+            fn scan_at(input: &[u8], pos: usize, __head: u32, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<usize> {
                 #scan_at
             }
 
@@ -648,13 +652,13 @@ fn impl_struct(
         impl #impl_generics ::tygr::Grammar for #ident #ty_generics #where_clause {
             type First = #first;
 
-            #[inline]
-            fn parse_at(input: &[u8], pos: usize, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
+            #[inline(always)]
+            fn parse_at(input: &[u8], pos: usize, __head: u32, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
                 #parse_at
             }
 
             #[inline(always)]
-            fn scan_at(input: &[u8], pos: usize, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<usize> {
+            fn scan_at(input: &[u8], pos: usize, __head: u32, #[allow(unused_mut)] mut state: ::tygr::State) -> Option<usize> {
                 #scan_at
             }
 
@@ -738,141 +742,79 @@ fn impl_enum(
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let n = each_first.len();
     let self_ty = quote! { #ident #ty_generics };
-    let parse_fn_ty = quote! {
-        fn(&[u8], usize, ::tygr::State<'_>) -> Option<(#self_ty, usize)>
-    };
-    let scan_fn_ty = quote! {
-        fn(&[u8], usize, ::tygr::State<'_>) -> Option<usize>
-    };
-    let case_fns: Vec<Ident> = (0..n)
-        .map(|k| Ident::new(&format!("parse_case_{k}"), Span::call_site()))
+    // Each alternative as its own always-inlined method (not a closure, which
+    // the compiler may leave out of line), so a constant first byte reaches
+    // the alternatives' own first tests.
+    let variant_parse_fns: Vec<Ident> = (0..n)
+        .map(|k| Ident::new(&format!("parse_variant_{k}"), Span::call_site()))
         .collect();
-    let scan_fns: Vec<Ident> = (0..n)
-        .map(|k| Ident::new(&format!("scan_case_{k}"), Span::call_site()))
+    let variant_scan_fns: Vec<Ident> = (0..n)
+        .map(|k| Ident::new(&format!("scan_variant_{k}"), Span::call_site()))
         .collect();
-    let case_defs = case_fns.iter().zip(&each_parse_at).enumerate().map(|(k, (name, arm))| {
-        let next = if k + 1 < n {
-            let nx = &case_fns[k + 1];
-            quote! { Self::#nx(input, pos, state) }
-        } else {
-            quote! { None }
-        };
-        quote! {
-            #[inline]
-            fn #name(input: &[u8], pos: usize, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
-                if let Some(result) = (|| { #arm })() { return Some(result); }
-                #next
+    let variant_fns = quote! {
+        #(
+            #[inline(always)]
+            fn #variant_parse_fns(input: &[u8], pos: usize, __head: u32, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
+                #each_parse_at
             }
-        }
-    });
-    let scan_case_defs = scan_fns
-        .iter()
-        .zip(&each_scan_at)
-        .enumerate()
-        .map(|(k, (name, arm))| {
-            let next = if k + 1 < n {
-                let nx = &scan_fns[k + 1];
-                quote! { Self::#nx(input, pos, state) }
-            } else {
-                quote! { None }
-            };
-            quote! {
-                #[inline]
-                fn #name(input: &[u8], pos: usize, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<usize> {
-                    if let Some(result) = (|| { #arm })() { return Some(result); }
-                    #next
-                }
+        )*
+        #(
+            #[inline(always)]
+            fn #variant_scan_fns(input: &[u8], pos: usize, __head: u32, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<usize> {
+                #each_scan_at
             }
-        });
-    // slots 0-255: u8 / byte / ascii char
-    // slots 256  : EOF
-    let build_table = |fn_ty: &TokenStream2, fns: &[Ident], miss: &TokenStream2| {
-        quote! {{
-            let parsers: [#fn_ty; #n] = [ #(<#self_ty>::#fns),* ];
-            // No case's FIRST set contains this byte, so none can match: dispatch
-            // straight to `miss`, which reports every variant's expectation in
-            // O(1) without attempting any of their (guaranteed-failing) real parses.
-            let mut table: [#fn_ty; 257] = [#miss; 257];
-            let mut first = 0usize;
-            while first < 257 {
-                let mut case = 0usize;
-                while case < #n {
-                    if CONTAINS_NIL[case] || (first <= 255 && CONTAINS_BYTE[case][first]) {
-                        table[first] = parsers[case];
-                        break;
-                    }
-                    case += 1;
-                }
-                first += 1;
-            }
-            table
-        }}
+        )*
     };
-    let parse_table = build_table(
-        &parse_fn_ty,
-        &case_fns,
-        &quote! { <#self_ty>::parse_case_miss },
-    );
-    let scan_table = build_table(
-        &scan_fn_ty,
-        &scan_fns,
-        &quote! { <#self_ty>::scan_case_miss },
-    );
-    const DISPATCH_THRESHOLD: usize = 4;
-    // `cfg!`, not `#[cfg(...)]`: this call is spliced into whatever crate
-    // derives `Grammar`, so an embedded `#[cfg(feature = "trace_pos")]`
-    // would check that crate's own (nonexistent) feature, not tygr's.
-    let fail_at_on_miss = if cfg!(feature = "trace_pos") {
-        quote! { Self::fail_at_variants(pos, state); }
-    } else {
-        quote! {}
+    // The alternatives in declaration order, each given the first byte.
+    let parse_choice = quote! {
+        #( if let Some(result) = Self::#variant_parse_fns(input, pos, __head, state.reborrow()) { return Some(result); } )*
+        None
     };
-    let (dispatch_body, scan_dispatch_body, case_impls) = if n >= DISPATCH_THRESHOLD {
+    let scan_choice = quote! {
+        #( if let Some(result) = Self::#variant_scan_fns(input, pos, __head, state.reborrow()) { return Some(result); } )*
+        None
+    };
+    // From this many variants on, compile the choice once per possible first
+    // byte (0-255, and 256 for the end of the input) and jump to the copy for
+    // the actual byte. With the byte a constant in each copy, the compiler
+    // drops the variants that cannot start with it and the first-byte checks
+    // of those that can; copies that come out identical are merged.
+    const ARMS_THRESHOLD: usize = 4;
+    let (dispatch_body, scan_dispatch_body, case_impls) = if n >= ARMS_THRESHOLD {
+        let parse_arms = (0..=256u32).map(|x| quote! { Self::parse_arm::<#x> });
+        let scan_arms = (0..=256u32).map(|x| quote! { Self::scan_arm::<#x> });
         (
+            quote! { Self::PARSE_ARMS[__head as usize](input, pos, state) },
+            quote! { Self::SCAN_ARMS[__head as usize](input, pos, state) },
             quote! {
-                const CONTAINS_NIL: [bool; #n] = [ #(<#each_first as ::tygr::first::First>::CONTAINS_NIL),* ];
-                const CONTAINS_BYTE: [[bool; 256]; #n] = [ #(<#each_first as ::tygr::first::First>::CONTAINS_BYTE),* ];
-                const DISPATCH: [#parse_fn_ty; 257] = #parse_table;
-                let first = input.get(pos).map(|&first| first as usize).unwrap_or(256);
-                DISPATCH[first](input, pos, state)
-            },
-            quote! {
-                const CONTAINS_NIL: [bool; #n] = [ #(<#each_first as ::tygr::first::First>::CONTAINS_NIL),* ];
-                const CONTAINS_BYTE: [[bool; 256]; #n] = [ #(<#each_first as ::tygr::first::First>::CONTAINS_BYTE),* ];
-                const DISPATCH: [#scan_fn_ty; 257] = #scan_table;
-                let first = input.get(pos).map(|&first| first as usize).unwrap_or(256);
-                DISPATCH[first](input, pos, state)
-            },
-            quote! {
-                #(#case_defs)*
-                #(#scan_case_defs)*
-
-                #[inline]
-                fn parse_case_miss(_input: &[u8], #[allow(unused_variables)] pos: usize, #[allow(unused_variables)] state: ::tygr::State) -> Option<(Self, usize)> {
-                    #fail_at_on_miss
-                    None
+                #[inline(always)]
+                fn parse_choice(input: &[u8], pos: usize, __head: u32, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
+                    #parse_choice
                 }
 
-                #[inline]
-                fn scan_case_miss(_input: &[u8], #[allow(unused_variables)] pos: usize, #[allow(unused_variables)] state: ::tygr::State) -> Option<usize> {
-                    #fail_at_on_miss
-                    None
+                #[inline(always)]
+                fn scan_choice(input: &[u8], pos: usize, __head: u32, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<usize> {
+                    #scan_choice
                 }
+
+                #[inline(never)]
+                fn parse_arm<const X: u32>(input: &[u8], pos: usize, state: ::tygr::State) -> Option<(Self, usize)> {
+                    Self::parse_choice(input, pos, X, state)
+                }
+
+                #[inline(never)]
+                fn scan_arm<const X: u32>(input: &[u8], pos: usize, state: ::tygr::State) -> Option<usize> {
+                    Self::scan_choice(input, pos, X, state)
+                }
+
+                const PARSE_ARMS: [fn(&[u8], usize, ::tygr::State<'_>) -> Option<(#self_ty, usize)>; 257] = [ #(#parse_arms),* ];
+                const SCAN_ARMS: [fn(&[u8], usize, ::tygr::State<'_>) -> Option<usize>; 257] = [ #(#scan_arms),* ];
             },
         )
     } else {
-        (
-            quote! {
-                #( if let Some(result) = (|| { #each_parse_at })() { return Some(result); } )*
-                None
-            },
-            quote! {
-                #( if let Some(result) = (|| { #each_scan_at })() { return Some(result); } )*
-                None
-            },
-            quote! {},
-        )
+        (parse_choice, scan_choice, quote! {})
     };
+    let case_impls = quote! { #variant_fns #case_impls };
     let parse_body = with_node(inline, dispatch_body);
     let scan_body = with_node(inline, scan_dispatch_body);
     let fail_at = with_node(inline, quote! { Self::fail_at_variants(pos, state) });
@@ -901,13 +843,13 @@ fn impl_enum(
         impl #impl_generics ::tygr::Grammar for #ident #ty_generics #where_clause {
             type First = #first;
 
-            #[inline]
-            fn parse_at(input: &[u8], pos: usize, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
+            #[inline(always)]
+            fn parse_at(input: &[u8], pos: usize, __head: u32, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<(Self, usize)> {
                 #parse_body
             }
 
             #[inline(always)]
-            fn scan_at(input: &[u8], pos: usize, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<usize> {
+            fn scan_at(input: &[u8], pos: usize, __head: u32, #[allow(unused_variables, unused_mut)] mut state: ::tygr::State) -> Option<usize> {
                 #scan_body
             }
 
