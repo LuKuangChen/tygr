@@ -642,8 +642,8 @@ impl<C: CharClass, V: Parse> Parse for Run<C, V> {
     }
 }
 
-/// Empty. (A `Run` keeps nothing to print, so `Raw`'s impl for a
-/// `T: Default + Print` doesn't cover it.)
+// `Raw`'s impl needs `T: Default + Print`, and a `Run` keeps nothing to
+// print.
 impl<C> Default for StringOf<C> {
     fn default() -> Self {
         Raw::new("")
