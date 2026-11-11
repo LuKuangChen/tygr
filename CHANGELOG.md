@@ -41,8 +41,9 @@ faster without it (33 → 114 MB/s).
   write `matches!(c, 'a'..='f')` rather than `('a'..='f').contains(&c)`.
   For a predicate that can't be `const`, such as `char::is_alphabetic`,
   use a `#[tygr(validated)]` type wrapping `char`.
-- `StringOf<C>` and `StringOf1<C>` are type aliases for `Raw<Vec<C>>` and
-  `Raw<Vec1<C>>`, so they `Debug`-print as `Raw(..)`.
+- `StringOf<C>` and `StringOf1<C>` are type aliases for a `Raw` that
+  matches as `Vec<C>` and `Vec1<C>` do, but in one loop, so they
+  `Debug`-print as `Raw(..)`.
 - `PhantomData<T>` no longer implements `Print` (it kept nothing to print
   back): a type with such a field derives `Parse` alone, or prints the
   field with `#[tygr(print_to = f)]`.

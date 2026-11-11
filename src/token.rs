@@ -3,12 +3,13 @@
 
 use either::Either::{self, Left, Right};
 use std::fmt;
+use std::marker::PhantomData;
 use std::ops::Range;
 
 #[cfg(feature = "trace_one_node")]
 use crate::Expectation;
 use crate::bnf::{Expr, Rules};
-use crate::first::{ByteSet, Required, byte_set};
+use crate::first::{ByteSet, Required, byte_set, contains};
 use crate::grammar::{Grammar, Mode, Parse, Print};
 use crate::state::State;
 use crate::{Raw, Vec1};
@@ -572,7 +573,7 @@ pub fn class_fail_at<C: CharClass>(
 /// # char_class!(IsSpace, "space", |ch| matches!(ch, ' ' | '\t'));
 /// type Ws = StringOf<IsSpace>;
 /// ```
-pub type StringOf<C> = Raw<Vec<C>>;
+pub type StringOf<C> = Raw<Run<C, Vec<C>>>;
 
 /// One or more chars of class `C`, kept as text.
 ///
@@ -582,7 +583,72 @@ pub type StringOf<C> = Raw<Vec<C>>;
 /// #[derive(Grammar)]
 /// struct Number(StringOf1<IsDigit>);
 /// ```
-pub type StringOf1<C> = Raw<Vec1<C>>;
+pub type StringOf1<C> = Raw<Run<C, Vec1<C>>>;
+
+/// Matches as `V`, `Vec<C>` or `Vec1<C>`, but in one loop rather than a
+/// `C` at a time, and keeps nothing: [`Raw`] keeps the text.
+#[doc(hidden)]
+pub struct Run<C, V>(PhantomData<(C, V)>);
+
+impl<C: CharClass, V: Parse> Parse for Run<C, V> {
+    type First = V::First;
+
+    #[inline]
+    fn parse_at<M: Mode>(
+        input: &str,
+        pos: usize,
+        state: State,
+    ) -> Option<(M::Output<Self>, usize)> {
+        // The byte set is exact for ASCII (see `class_parse_at`): as a
+        // table, a member costs a load.
+        let ascii: &[bool; 256] = &const {
+            let mut ascii = [false; 256];
+            let mut b = 0;
+            while b < 0x80 {
+                ascii[b] = C::BYTE_SET.contains(b as u8);
+                b += 1;
+            }
+            ascii
+        };
+        let mut end = pos;
+        while let Some(&b) = input.as_bytes().get(end) {
+            if ascii[b as usize] {
+                end += 1;
+            } else if !b.is_ascii()
+                && let Some((ch, next)) = decode_char(input, end)
+                && C::matches(ch)
+            {
+                end = next;
+            } else {
+                break;
+            }
+        }
+        // As `V` does, record the `C` expected where the run stopped.
+        C::fail_at(end, state);
+        // `Vec` matches empty input; `Vec1` needs a `C`.
+        (end != pos || contains::<V::First>(None)).then(|| (M::build(|_| Run(PhantomData)), end))
+    }
+
+    fn fail_at(pos: usize, state: State) -> bool {
+        V::fail_at(pos, state)
+    }
+
+    fn to_bnf() -> Expr {
+        V::to_bnf()
+    }
+
+    fn visit_rules(rules: &mut Rules) {
+        V::visit_rules(rules);
+    }
+}
+
+/// Empty. (A `Run` keeps nothing to print, so `Raw`'s impl for a
+/// `T: Default + Print` doesn't cover it.)
+impl<C> Default for StringOf<C> {
+    fn default() -> Self {
+        Raw::new("")
+    }
+}
 
 #[cfg(test)]
 mod tests {

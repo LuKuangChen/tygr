@@ -109,8 +109,7 @@ impl<T> Print for Raw<T> {
     }
 }
 
-/// The text `T::default()` prints, so a [`StringOf`](crate::StringOf)
-/// defaults to empty.
+/// The text `T::default()` prints.
 impl<T: Default + Print> Default for Raw<T> {
     fn default() -> Self {
         Raw::from(T::default().print())

@@ -111,6 +111,72 @@ fn char_class_computes_first_bytes() {
     assert!(Word::parse("aBc").is_err());
 }
 
+// Members of each width, each beside a non-member that differs only in its
+// last byte: 'é' C3 A9 / 'è' C3 A8, '平' E5 B9 B3 / '年' E5 B9 B4,
+// '😀' F0 9F 98 80 / '😁' F0 9F 98 81.
+char_class!(Letter, |ch| matches!(ch, 'a'..='z' | 'é' | '平' | '😀'));
+
+/// Each input, matched up to its last member.
+const RUNS: [(&str, usize); 10] = [
+    ("", 0),
+    ("abc", 3),
+    ("abcD", 3),
+    ("Dabc", 0),
+    ("aé平😀b", 11),
+    ("aè", 1),
+    ("é平年", 5),
+    ("😀😁", 4),
+    ("è", 0),
+    ("ab1é", 2),
+];
+
+#[test]
+fn string_of_runs_over_chars_of_any_width() {
+    for (input, end) in RUNS {
+        let text = &input[..end];
+        let (run, run_end) = StringOf::<Letter>::parse_prefix(input).unwrap();
+        assert_eq!((run.as_str(), run_end), (text, end), "{input:?}");
+        assert_eq!(StringOf::<Letter>::check_prefix(input), Ok(end));
+        // `StringOf1` is the same run, unless it's empty.
+        let run1 = StringOf1::<Letter>::parse_prefix(input).map(|(run, end)| (run.0, end));
+        assert_eq!(run1.ok(), (end > 0).then(|| (text.to_string(), end)));
+        assert_eq!(StringOf1::<Letter>::check_prefix(input).is_ok(), end > 0);
+    }
+    assert_eq!(StringOf::<Letter>::default().as_str(), "");
+}
+
+#[test]
+fn string_of_matches_and_fails_as_its_vec() {
+    fn text<T>(result: Result<(Raw<T>, usize), Error>) -> Result<(String, usize), Error> {
+        result.map(|(raw, end)| (raw.0, end))
+    }
+    for (input, _) in RUNS {
+        assert_eq!(
+            text(StringOf::<Letter>::parse_prefix(input)),
+            text(Raw::<Vec<Letter>>::parse_prefix(input))
+        );
+        assert_eq!(
+            StringOf::<Letter>::check(input),
+            Raw::<Vec<Letter>>::check(input)
+        );
+        assert_eq!(
+            text(StringOf1::<Letter>::parse_prefix(input)),
+            text(Raw::<Vec1<Letter>>::parse_prefix(input))
+        );
+        assert_eq!(
+            StringOf1::<Letter>::check(input),
+            Raw::<Vec1<Letter>>::check(input)
+        );
+    }
+    // And reads as it in BNF.
+    #[derive(Grammar)]
+    struct Words(StringOf<Letter>, StringEq!(" "), StringOf1<Letter>);
+    assert_eq!(
+        rule::<Words>(),
+        "Words = { 'Letter' } \" \" 'Letter' { 'Letter' } ."
+    );
+}
+
 #[test]
 fn char_first_is_ascii_and_lead_bytes() {
     let starts = |b| tygr::first::contains::<<char as Parse>::First>(Some(b));

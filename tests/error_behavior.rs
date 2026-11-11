@@ -88,6 +88,29 @@ fn char_class_records_class_name() {
     );
 }
 
+char_class!(IsLetter, "letter", |ch| matches!(ch, 'a'..='z' | 'é'));
+
+#[derive(Grammar, Debug, PartialEq, Eq)]
+struct Line(StringOf1<IsLetter>, StringEq!(";"));
+
+#[test]
+fn string_of_records_its_class_where_the_run_stops() {
+    // 'è' (C3 A8) stops the run, though 'é' (C3 A9) shares its first byte.
+    let err = Line::parse("aéè;").unwrap_err();
+    let trace = |expectation| Trace {
+        context: vec![frame("Line", 0)],
+        expectation,
+    };
+    assert_error(
+        err,
+        vec![
+            trace(Expectation::CharClass("letter")),
+            trace(token(";", 3..3)),
+        ],
+        3,
+    );
+}
+
 #[derive(Parse, Debug, PartialEq, Eq)]
 struct SmallNumber(#[tygr(from_str = StringOf1<IsDigit>)] u8);
 
